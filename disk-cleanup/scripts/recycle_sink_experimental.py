@@ -10,12 +10,13 @@ RECYCLE_FLAG = 0x80
 
 
 class DeleteObserver:
-    def __init__(self):
+    def __init__(self, *, permit_delete=True):
         if os.name != 'nt':
             raise OSError('Windows only')
         self.events = []
         self.refs = 1
         self.callbacks = []
+        self.permit_delete = permit_delete
         P, D, H, W = ctypes.c_void_p, ctypes.c_uint32, ctypes.c_int32, ctypes.c_wchar_p
 
         def bind(types, function, result=H):
@@ -49,8 +50,10 @@ class DeleteObserver:
             return self.refs
 
         def pre_delete(this, flags, item):
-            allowed = bool(flags & RECYCLE_FLAG)
-            self.events.append({'event': 'pre_delete', 'flags': flags, 'recycle_requested': allowed})
+            requested = bool(flags & RECYCLE_FLAG)
+            allowed = requested and self.permit_delete is True
+            self.events.append({'event': 'pre_delete', 'flags': flags, 'recycle_requested': requested,
+                                'allowed': allowed})
             return 0 if allowed else E_ABORT
 
         def post_delete(this, flags, item, hr, recycled_item):

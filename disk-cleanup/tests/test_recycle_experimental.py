@@ -106,6 +106,15 @@ class NativePreparationTests(unittest.TestCase):
         self.assertFalse(observer.events[-1]['recycle_item_provided'])
         self.assertEqual(observer.events[-1]['hresult'], -1)
 
+    def test_observer_can_cancel_even_with_recycle_flag(self):
+        from recycle_sink_experimental import DeleteObserver, E_ABORT
+        observer = DeleteObserver(permit_delete=False)
+        pre = recycle.NativeAdapter._method(observer.pointer, 11, ctypes.c_long,
+                                           ctypes.c_uint32, ctypes.c_void_p)
+        self.assertEqual(pre(observer.pointer, 0x80, None), E_ABORT)
+        self.assertTrue(observer.events[-1]['recycle_requested'])
+        self.assertFalse(observer.events[-1]['allowed'])
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -136,6 +136,51 @@ class LiveRecycleTest(unittest.TestCase):
     def test_directory_transaction_recovers_after_real_recycle(self):
         self.transaction_roundtrip(directory=True)
 
+    def canceled_transaction(self, directory):
+        parent = os.environ.get('DISK_CLEANUP_LIVE_TEST_PARENT') or None
+        root = Path(tempfile.mkdtemp(prefix='disk-cleanup-owned-cancel-', dir=parent))
+        source = root / ('fixture-' + uuid.uuid4().hex)
+        if directory:
+            (source / 'nested').mkdir(parents=True)
+            payload = source / 'nested' / 'payload.bin'
+        else:
+            payload = source
+        content = os.urandom(64)
+        payload.write_bytes(content)
+        identity = windows_identity.capture(source)
+        parents = windows_parents.capture_parent_chain(source)
+        outcomes = []
+        def backend(staged):
+            outcomes.append(recycle_experimental.run_experiment(staged,
+                recycle_experimental.NativeAdapter(permit_delete=False)))
+        result = transaction_experimental.run_fixture(source, identity, backend, parent_chain=parents)
+        self.assertEqual(result['status'], 'RESTORED', f'{result}; fixture retained at {root}')
+        self.assertEqual(payload.read_bytes(), content, f'Content differs; retained at {root}')
+        actual = windows_identity.capture(source)
+        self.assertEqual((actual['volume_serial'], actual['file_id']),
+                         (identity['volume_serial'], identity['file_id']))
+        payload.unlink()
+        if directory:
+            (source / 'nested').rmdir()
+            source.rmdir()
+        Path(result['journal']).unlink()
+        root.rmdir()
+        self.assertEqual(len(outcomes), 1)
+        self.assertEqual(outcomes[0]['status'], 'UNKNOWN')
+        callbacks = outcomes[0].get('delete_callbacks', [])
+        pre = [row for row in callbacks if row['event'] == 'pre_delete']
+        self.assertTrue(pre)
+        self.assertTrue(all(row['allowed'] is False for row in pre))
+        posts = [row for row in callbacks if row['event'] == 'post_delete']
+        self.assertFalse(any(not recycle_experimental._failed(row['hresult'])
+                             and row['recycle_item_provided'] for row in posts))
+
+    def test_canceled_file_transaction_preserves_original(self):
+        self.canceled_transaction(directory=False)
+
+    def test_canceled_directory_transaction_preserves_original(self):
+        self.canceled_transaction(directory=True)
+
     def test_exclusively_locked_file_remains_present(self):
         parent = os.environ.get('DISK_CLEANUP_LIVE_TEST_PARENT') or None
         root = Path(tempfile.mkdtemp(prefix='disk-cleanup-owned-fixture-', dir=parent))

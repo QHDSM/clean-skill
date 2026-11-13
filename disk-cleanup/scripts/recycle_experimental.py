@@ -66,13 +66,14 @@ def run_experiment(path, adapter):
 
 class NativeAdapter:
     """Thin COM adapter for an isolated experiment, not a cleanup safety gate."""
-    def __init__(self, *, observe=False):
+    def __init__(self, *, observe=False, permit_delete=True):
         self.operation = ctypes.c_void_p()
         self.item = ctypes.c_void_p()
         self.initialized = False
         self.ole = self.shell = None
         self.observe = observe
         self.observer = None
+        self.permit_delete = permit_delete
 
     def initialize(self):
         if os.name != 'nt' or sys.getwindowsversion() < (6, 2):
@@ -123,9 +124,9 @@ class NativeAdapter:
             raise BackendError('SHCreateItemFromParsingName returned an empty interface')
 
     def queue_delete(self):
-        if self.observe:
+        if self.observe or self.permit_delete is not True:
             from recycle_sink_experimental import DeleteObserver
-            self.observer = DeleteObserver()
+            self.observer = DeleteObserver(permit_delete=self.permit_delete)
         _check(self._method(self.operation, 18, ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p)
                (self.operation, self.item, self.observer.pointer if self.observer else None), 'DeleteItem')
 
