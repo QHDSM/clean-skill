@@ -7,6 +7,8 @@ description: Analyze Windows disk usage and carry out scoped cleanup after one t
 
 帮助用户找出占用来源，在一次明确授权内自主完成清理，核实实际收益。Windows 优先；其他系统仅提供明确适用的分析，不套用 Windows 命令。
 
+**当前版本只支持扫描和计划预览。** `clean.py --go` 已停用：旧 Windows Shell 接口不能保证仅回收而不永久删除。不要用其他删除命令绕过这个限制。目录指纹不能证明子孙文件未变，Git 风险证据也不会自动发现；预览通过不代表目标安全或可执行。
+
 ## 1. 确定范围
 
 识别用户的分析/执行意图、目标空间和排除项。只要求分析时保持只读；指定目录时不扩大到整盘。全机默认包含可访问的本地固定磁盘，不包含移动磁盘、网络盘、其他用户配置文件的受限内容。不要默认提权。
@@ -64,14 +66,14 @@ python scripts/git_audit.py '<仓库路径>' --format json
  "reason":"45 天未改的构建缓存","evidence":{"fingerprint":[1,2,3,4,5]}}]}
 ```
 
-计划交给 `clean.py` 执行，它**只读计划、不重放扫描结果**，因此不会删掉计划外的东西：
+计划交给 `clean.py` 预览，它读取计划，不重放扫描结果：
 
 ```powershell
 python scripts/clean.py --plan plan.json          # dry-run，只打印
-python scripts/clean.py --plan plan.json --go     # 执行
+python scripts/clean.py --plan plan.json --go     # 当前拒绝执行
 ```
 
-门禁不过（schema 错、缺指纹、路径越权、落在排除项、缺 reason、`risk=never`）整份拒绝，一个都不删。执行只走回收站；失败即拒绝该项并如实报告，**不降级为永久删除**。删除前逐项用指纹重验，扫描后变化的对象跳过并说明原因。
+计划结构错误或路径与排除项重叠时整份拒绝；其他 preflight 拒绝和指纹变化按目标报告。目录本身的指纹不能证明其内容未变化。真实执行目前一律拒绝。
 
 计划含 Git 仓库时，`evidence.git` 填 `git_audit.py` 的结论；`verdict` 不是 `SAFE_TO_CONSIDER` 而 `risk` 为 `safe` 时，必须 `authorization.git_acknowledged: true` 才执行。
 

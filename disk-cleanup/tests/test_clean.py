@@ -166,7 +166,14 @@ class GateTests(unittest.TestCase):
         target_path.mkdir()
         plan = self.factory.plan([self.factory.target(target_path)],
                                  authorization={'excluded': [str(excluded_dir)]})
-        self.assert_gate(plan, 'falls inside an excluded root')
+        self.assert_gate(plan, 'overlaps an excluded root')
+
+    def test_rejects_parent_of_excluded(self):
+        private = self.victim / 'private'
+        private.mkdir()
+        plan = self.factory.plan([self.factory.target(self.victim)],
+                                 authorization={'excluded': [str(private)]})
+        self.assert_gate(plan, 'overlaps an excluded root')
 
     # --- git gate -----------------------------------------------------------
 
@@ -334,6 +341,17 @@ class RunTests(unittest.TestCase):
         report = self.run_plan(self.factory.plan([self.factory.target(self.cache)]), go=False)
         self.assertEqual(report['summary']['dry_run'], 1)
         self.assertEqual(report['summary']['trashed'], 0)
+        self.assertTrue(self.cache.exists())
+
+    def test_execution_is_disabled_before_any_action(self):
+        with self.assertRaisesRegex(clean.GateError, 'execution disabled'):
+            self.run_plan(self.factory.plan([self.factory.target(self.cache)]), go=True)
+        self.assertTrue((self.cache / 'blob.bin').exists())
+
+    def test_trash_helper_is_disabled(self):
+        ok, detail = clean.trash_one(str(self.cache))
+        self.assertFalse(ok)
+        self.assertIn('execution disabled', detail)
         self.assertTrue(self.cache.exists())
 
     def test_report_is_json_serialisable(self):

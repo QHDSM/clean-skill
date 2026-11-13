@@ -25,7 +25,7 @@ Windows 存储设置及“临时文件”/“清理建议”用于核实候选�
 
 清理统一经 `scripts/clean.py` 执行，不要用 `Remove-Item` 手工拼命令：
 
-- `clean.py` 用 `SHFileOperationW` + `FOF_ALLOWUNDO` 移入回收站，失败即拒绝该项，不降级为永久删除。
+- `clean.py` 当前仅预览，`--go` 一律拒绝。旧 Shell 接口的 `FOF_ALLOWUNDO` 只在可能时保留撤销信息，不能保证只进回收站；不要绕过限制。
 - 它在执行前重新 `lstat` 每个目标，与计划中的 `(st_dev, st_ino, st_size, st_mtime_ns, st_ctime_ns)` 比对；不一致就跳过。这正是为了避开「扫描时是缓存、执行时已变成别的东西」。
 - 受保护树（`C:\Windows`、`C:\$Recycle.Bin`、`C:\System Volume Information`、`C:\Recovery`、`C:\Boot`）整棵拒绝；`C:\ProgramData`、`C:\Program Files`、`C:\Users` 只拒绝目录本身，其下被明确点名的缓存子目录仍可处理。
 - `Remove-Item` 通常永久删除，不等于回收站；`-WhatIf` 只是预览，不等于安全性证明。需要手工处理时先确认 `clean.py` 为何拒绝，而不是绕开它。

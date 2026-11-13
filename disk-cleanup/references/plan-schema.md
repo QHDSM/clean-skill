@@ -1,5 +1,7 @@
 # 计划格式（disk-cleanup-plan/v1）
 
+**当前只能预览，`--go` 一律拒绝执行。** 目录指纹不覆盖子孙内容；Git 证据需要人工提供，门禁不能自动发现仓库。预览结果不是安全执行的保证。
+
 `clean.py` 的唯一输入。字段缺失或类型不符会导致**整份计划被拒绝**，一个对象都不会删除。
 
 ## 顶层
@@ -17,7 +19,7 @@
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
 | `scope` | string[] | ✅ | 非空；每项必须是带盘符的绝对路径（如 `C:\`、`D:\Projects`） |
-| `excluded` | string[] | ❌ | 任何落在这些根下的目标一律拒绝；优先于 `scope` |
+| `excluded` | string[] | ❌ | 与排除根有祖先或后代关系的目标均拒绝；优先于 `scope` |
 | `permanent_delete` | boolean | ❌ | 必须为 `false` 或省略。本执行器不做永久删除 |
 | `git_acknowledged` | boolean | ❌ | 见「Git 风险」一节 |
 
@@ -45,8 +47,8 @@
 
 | 值 | 行为 |
 |---|---|
-| `safe` | 正常执行（仍受 Git 风险闸门约束） |
-| `caution` | 正常执行；报告中标为需注意 |
+| `safe` | 预览时标记为低风险，不证明安全 |
+| `caution` | 预览时标为需注意 |
 | `never` | **绝不执行**。即使写进计划也会被 preflight 拒绝并计入 `refused` |
 
 ## Git 风险
@@ -63,13 +65,13 @@
 ```
 
 闸门规则：`risk` 为 `safe` 但 `verdict` 不是 `SAFE_TO_CONSIDER` 时，必须同时设置
-`authorization.git_acknowledged: true`，否则整份计划被拒绝。这防止「把有本地独有数据的仓库当缓存清掉」。
+`authorization.git_acknowledged: true`，否则整份计划被拒绝。此检查仅在提供了 Git 证据时生效，不能自动识别仓库，也不能独立防止误删。
 
 `verdict` 取值：
 
 | verdict | 含义 | 建议 |
 |---|---|---|
-| `SAFE_TO_CONSIDER` | 所有内容已在远端，工作区干净 | 可按 `safe` 处理 |
+| `SAFE_TO_CONSIDER` | 审计结果满足其判定条件（不证明远端实时状态） | 可按 `safe` 处理 |
 | `LOCAL_ONLY_DATA_PRESENT` | 有未推送提交或本地独有引用 | 先向用户说明；确认后设 `git_acknowledged` |
 | `LOCAL_MODIFICATIONS` | 有未提交改动/暂存/冲突 | 同上 |
 | `UNVERIFIED` | 证据不足（无 remote 或检查失败） | 不能按安全处理 |
@@ -85,7 +87,7 @@
 7. 每项 `reason` 非空。
 8. 每项 `evidence.fingerprint` 必须是 5 个整数。
 9. 每项 `path` 必须落在某个 `scope` 内。
-10. 每项 `path` 不得落在任何 `excluded` 内。
+10. 每项 `path` 不得与任何 `excluded` 重叠（包括目标为排除项的父目录）。
 11. Git 风险闸门（见上）。
 
 ## 退出码
@@ -165,5 +167,5 @@
 python scripts/clean.py --path 'C:\temp\x' --confirm-path 'C:\temp\x' --go
 ```
 
-两个参数 resolve 后必须指向同一对象。这验证的是「知道要删什么」，不是「会打字」。
+两个参数规范化后的路径字符串必须相同；这不证明文件身份。
 单路径模式仍经过同一套 preflight 与指纹校验（指纹取当前状态，不做历史比对）。

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Plan-gated cleanup executor for Windows.
 
-Dry-run by default. Only the Recycle Bin is used; a failed trash is refused, never
-downgraded to a permanent delete. Python 3.10+, standard library only.
+Plan validation and dry-run only. Execution is disabled because the legacy Shell
+API does not guarantee recycle-only behavior. Python 3.10+, standard library only.
 
 Two modes:
 
@@ -19,13 +19,11 @@ Safety model (enforced here, not in prose):
   4. Every target is re-verified against the fingerprint recorded at scan time
      (st_dev, st_ino, st_size, st_mtime_ns); st_ctime is recorded but not compared,
      because a read bumps it on Windows. A changed object is skipped.
-  5. Trash failure is a refusal. The executor has no fallback to permanent deletion.
+  5. Execution is disabled pending a verified recycle-only backend.
   6. Space inside the Recycle Bin is NOT reclaimed until it is emptied; the report
      says so instead of claiming the space was freed.
 """
 import argparse
-import ctypes
-from ctypes import wintypes
 import hashlib
 import json
 import os
@@ -142,8 +140,9 @@ def load_plan(path):
         # Scope containment and exclusion are checked here so a bad plan runs nothing.
         if not any(scan.within(path_value, root) for root in scope):
             raise GateError(f'{where}.path is outside every authorized scope: {path_value}')
-        if any(scan.within(path_value, root) for root in excluded):
-            raise GateError(f'{where}.path falls inside an excluded root: {path_value}')
+        if any(scan.within(path_value, root) or scan.within(root, path_value)
+               for root in excluded):
+            raise GateError(f'{where}.path overlaps an excluded root: {path_value}')
 
         git = evidence.get('git')
         if git is not None:
@@ -240,43 +239,9 @@ def reverify(target):
 
 # ------------------------------------------------------------------------- execute
 
-class SHFILEOPSTRUCTW(ctypes.Structure):
-    _fields_ = [
-        ('hwnd', wintypes.HWND),
-        ('wFunc', wintypes.UINT),
-        ('pFrom', wintypes.LPCWSTR),
-        ('pTo', wintypes.LPCWSTR),
-        ('fFlags', ctypes.c_uint16),
-        ('fAnyOperationsAborted', wintypes.BOOL),
-        ('hNameMappings', ctypes.c_void_p),
-        ('lpszProgressTitle', wintypes.LPCWSTR),
-    ]
-
-
 def trash_one(path):
-    """Move one path to the Recycle Bin. Returns (ok, detail). No fallback, ever."""
-    if os.name != 'nt':
-        return False, 'Recycle Bin execution is Windows-only'
-    FO_DELETE = 3
-    FOF_ALLOWUNDO = 0x0040
-    FOF_NOCONFIRMATION = 0x0010
-    FOF_SILENT = 0x0004
-    FOF_NOERRORUI = 0x0400
-    op = SHFILEOPSTRUCTW()
-    op.wFunc = FO_DELETE
-    op.pFrom = os.path.abspath(path) + '\x00\x00'   # double-null terminated
-    op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI
-    try:
-        rc = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op))
-    except (AttributeError, OSError) as exc:
-        return False, f'SHFileOperationW unavailable: {exc}'
-    if rc != 0:
-        return False, f'SHFileOperationW returned {rc}'
-    if op.fAnyOperationsAborted:
-        return False, 'operation aborted by the system'
-    if os.path.lexists(path):
-        return False, 'still present after the call'
-    return True, 'ok'
+    """Refuse execution until a backend guarantees recycle-only behavior."""
+    return False, 'execution disabled: recycle-only behavior is not guaranteed'
 
 
 def volume_free(path):
@@ -311,6 +276,8 @@ def write_audit(plan_path, records, plan_digest):
 # ---------------------------------------------------------------------------- main
 
 def run(args):
+    if args.go:
+        raise GateError('execution disabled: recycle-only behavior is not guaranteed')
     if not args.plan and not args.path:
         raise GateError('either --plan or --path is required')
 
@@ -378,7 +345,7 @@ def run(args):
         entry['fingerprint'] = target['evidence']['fingerprint']
 
         if not args.go:
-            entry.update(result='dry_run', detail='would move to Recycle Bin')
+            entry.update(result='dry_run', detail='preview only; execution disabled')
             results.append(entry)
             continue
 
@@ -408,6 +375,8 @@ def run(args):
         'mode': 'EXECUTED' if args.go else 'DRY-RUN',
         'plan': args.plan,
         'plan_digest': digest,
+        'execution_available': False,
+        'preview_warning': 'Directory contents and Git risks are not fully verified.',
         'summary': {
             'total': len(results),
             'trashed': len(trashed),
@@ -430,6 +399,7 @@ def run(args):
 
 def render(report):
     lines = [f"=== {report['mode']} ===", f"plan: {report['plan'] or '(single path)'}"]
+    lines.append('Execution disabled. ' + report['preview_warning'])
     summary = report['summary']
     lines.append(
         'total %d | trashed %d | dry-run %d | skipped %d | refused %d | failed %d'
