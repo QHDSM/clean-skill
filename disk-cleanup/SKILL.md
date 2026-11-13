@@ -90,7 +90,7 @@ python scripts/clean.py --plan plan.json --go     # 当前拒绝执行
 
 计划结构错误或路径与排除项重叠时整份拒绝；其他 preflight 拒绝和指纹变化按目标报告。目录本身的指纹不能证明其内容未变化。真实执行目前一律拒绝。
 
-计划含 Git 仓库时，`evidence.git` 填 `git_audit.py` 的结论；`verdict` 不是 `SAFE_TO_CONSIDER` 而 `risk` 为 `safe` 时，必须 `authorization.git_acknowledged: true` 才执行。
+计划的清理项含 Git 证据时，未知或有风险的结论必须 `authorization.git_acknowledged: true` 才能通过门禁；`safe` 与 `caution` 均受约束。缺失或未知 verdict 会被拒绝；即使 verdict 标为安全，仍需完整的同步、unknown 和 risks 字段支持。预览发现 Git 标记而无审计证据，或 Git 发现不完整时，会拒绝该目标。此检查不验证证据对应仓库或真实性，不代替实际审计和用户授权。
 
 空间进入回收站，清空前不真正释放；如实说明，不谎报已释放。
 

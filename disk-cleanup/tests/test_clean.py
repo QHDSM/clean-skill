@@ -215,10 +215,32 @@ class GateTests(unittest.TestCase):
         loaded = clean.load_plan(self.write(plan))
         self.assertEqual(len(loaded['targets']), 1)
 
-    def test_accepts_git_verdict_on_caution(self):
+    def test_caution_does_not_bypass_git_acknowledgment(self):
         target = self.factory.target(self.victim, risk='caution')
         target['evidence']['git'] = {'verdict': 'LOCAL_ONLY_DATA_PRESENT'}
         plan = self.factory.plan([target])
+        self.assert_gate(plan, 'git_acknowledged is not true')
+
+    def test_missing_git_verdict_is_rejected(self):
+        target = self.factory.target(self.victim)
+        target['evidence']['git'] = {}
+        self.assert_gate(self.factory.plan([target]), 'recognized verdict')
+
+    def test_safe_label_with_unknown_evidence_needs_acknowledgment(self):
+        target = self.factory.target(self.victim)
+        target['evidence']['git'] = {'verdict': 'SAFE_TO_CONSIDER', 'all_content_synced': True,
+                                     'unknown': ['not verified'], 'risks': []}
+        self.assert_gate(self.factory.plan([target]), 'git_acknowledged is not true')
+
+    def test_report_only_git_risk_does_not_require_cleanup_acknowledgment(self):
+        target = self.factory.target(self.victim, action='report')
+        target['evidence']['git'] = {'verdict': 'LOCAL_ONLY_DATA_PRESENT'}
+        self.assertEqual(len(clean.load_plan(self.write(self.factory.plan([target])))['targets']), 1)
+
+    def test_acknowledged_caution_git_risk_is_accepted(self):
+        target = self.factory.target(self.victim, risk='caution')
+        target['evidence']['git'] = {'verdict': 'UNVERIFIED'}
+        plan = self.factory.plan([target], authorization={'git_acknowledged': True})
         self.assertEqual(len(clean.load_plan(self.write(plan))['targets']), 1)
 
 
@@ -387,6 +409,25 @@ class RunTests(unittest.TestCase):
         self.assertIn(str(marker), entry['git_discovery']['markers'])
         self.assertFalse(entry['directory_contents_verified'])
         self.assertIn('Git marker:', clean.render(report))
+        self.assertEqual(report['summary']['refused'], 1)
+        self.assertIn('audit evidence missing', report['results'][0]['detail'])
+
+    def test_incomplete_git_discovery_is_not_a_clean_preview(self):
+        target = self.factory.target(self.cache)
+        discovery = {'markers': [], 'complete': False, 'issues': ['limit reached'], 'entries_checked': 1}
+        with patch.object(clean.git_discovery, 'discover', return_value=discovery):
+            report = self.run_plan(self.factory.plan([target]))
+        self.assertEqual(report['summary']['refused'], 1)
+        self.assertIn('incomplete', report['results'][0]['detail'])
+
+    def test_acknowledgment_without_audit_does_not_cover_discovered_repo(self):
+        (self.cache / '.git').mkdir()
+        target = self.factory.target(self.cache, risk='caution')
+        report = self.run_plan(self.factory.plan([target], authorization={'git_acknowledged': True}))
+        self.assertEqual(report['summary']['refused'], 1)
+        target['evidence']['git'] = {'verdict': 'UNVERIFIED'}
+        report = self.run_plan(self.factory.plan([target], authorization={'git_acknowledged': True}))
+        self.assertEqual(report['summary']['dry_run'], 1)
 
     def test_execution_is_disabled_before_any_action(self):
         with self.assertRaisesRegex(clean.GateError, 'execution disabled'):

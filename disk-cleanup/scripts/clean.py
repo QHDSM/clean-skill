@@ -44,6 +44,7 @@ import windows_parents
 SCHEMA = 'disk-cleanup-plan/v1'
 ACTIONS = {'trash', 'keep', 'report'}
 RISKS = {'safe', 'caution', 'never'}
+GIT_VERDICTS = {'SAFE_TO_CONSIDER', 'LOCAL_ONLY_DATA_PRESENT', 'LOCAL_MODIFICATIONS', 'UNVERIFIED'}
 BATCH_LIMIT = 200
 
 # Two levels of protection, deliberately different:
@@ -197,10 +198,14 @@ def load_plan_with_digest(path):
             if not isinstance(git, dict):
                 raise GateError(f'{where}.evidence.git must be an object or null')
             verdict = git.get('verdict')
-            if risk == 'safe' and verdict and verdict != 'SAFE_TO_CONSIDER':
-                if not auth.get('git_acknowledged'):
+            if not isinstance(verdict, str) or verdict not in GIT_VERDICTS:
+                raise GateError(f'{where}.evidence.git.verdict must be a recognized verdict')
+            safe_evidence = (verdict == 'SAFE_TO_CONSIDER' and git.get('all_content_synced') is True
+                             and git.get('unknown') == [] and git.get('risks') == [])
+            if action == 'trash' and not safe_evidence:
+                if auth.get('git_acknowledged') is not True:
                     raise GateError(
-                        f'{where} records Git risk {verdict!r} but risk is "safe" and '
+                        f'{where} records unverified Git evidence {verdict!r} and '
                         'authorization.git_acknowledged is not true')
 
     return plan, hashlib.sha256(raw).hexdigest()
@@ -392,6 +397,15 @@ def run(args):
             results.append(entry)
             continue
 
+        entry['directory_contents_verified'] = False if os.path.isdir(path) else None
+        discovery = entry['git_discovery'] = git_discovery.discover(path)
+        if not discovery['complete'] or (discovery['markers'] and target['evidence'].get('git') is None):
+            detail = 'Git discovery incomplete' if not discovery['complete'] else 'Git markers found but audit evidence missing'
+            entry.update(result='refused', detail=detail)
+            refused.append(entry)
+            results.append(entry)
+            continue
+
         file_id = target['evidence'].get('windows_file_id')
         if file_id is not None:
             try:
@@ -434,8 +448,6 @@ def run(args):
 
         entry['size_bytes'] = target['evidence'].get('size_bytes')
         entry['fingerprint'] = target['evidence']['fingerprint']
-        entry['git_discovery'] = git_discovery.discover(path)
-        entry['directory_contents_verified'] = False if os.path.isdir(path) else None
 
         if not args.go:
             entry.update(result='dry_run', detail='preview only; execution disabled')

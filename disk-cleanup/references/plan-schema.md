@@ -77,8 +77,9 @@ Windows 下可运行 `python scripts/windows_identity.py '<绝对路径>'`，将
 }
 ```
 
-闸门规则：`risk` 为 `safe` 但 `verdict` 不是 `SAFE_TO_CONSIDER` 时，必须同时设置
-`authorization.git_acknowledged: true`，否则整份计划被拒绝。此检查仅在提供了 Git 证据时生效，不能自动识别仓库，也不能独立防止误删。
+闸门规则：所有 `trash` 项均适用，与 `safe` / `caution` 标签无关。`verdict` 必须在下表枚举内；只有 `SAFE_TO_CONSIDER` 且 `all_content_synced: true`、`unknown: []`、`risks: []` 同时满足时，才不需要 Git 风险确认。否则必须 `authorization.git_acknowledged: true`，缺少则整份计划被拒绝。`keep` / `report` 不需要清理确认，但提供的 verdict 仍需合法。
+
+预览发现 `.git` 标记但没有 `evidence.git`，或发现覆盖不完整时，会拒绝该目标；单独设置 `git_acknowledged` 不代替缺失的审计。标记发现仍可能遗漏裸仓库或外部 Git 目录。这些字段由计划提供，不保证审计与目标对应、未过期或真实，也不构成用户授权证明。
 
 当前 Git 审计不会 fetch，也不覆盖所有本地标签、reflog 和不可达提交，因此 `unknown` 始终非空、`all_content_synced` 不会为 true。分支领先数相加可能重复计数；失效上游、分离 HEAD 或读取失败均不能当作安全结论。
 
