@@ -3,10 +3,11 @@
 需要回答“空间为什么又满了”时，保存同范围扫描的 JSON，再比较：
 
 ```powershell
-python scripts/scan.py 'D:\Projects' --format json --output baseline.json
+New-Item -ItemType Directory -Force reports | Out-Null
+python scripts/scan.py 'D:\Projects' --format json --output reports/baseline.json
 # 以后按相同 roots、排除项和深度扫描，使用新文件名；扫描器不覆盖已有报告
-python scripts/scan.py 'D:\Projects' --format json --output current.json
-python scripts/compare_scans.py baseline.json current.json
+python scripts/scan.py 'D:\Projects' --format json --output reports/current.json
+python scripts/compare_scans.py reports/baseline.json reports/current.json
 ```
 
 比较命令只读取报告并输出 JSON，不访问报告内的目标路径，不产生清理计划，也不执行删除。报告含个人路径，应留在本地。

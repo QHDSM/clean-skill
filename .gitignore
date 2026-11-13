@@ -9,3 +9,9 @@ plan*.json
 audit-*.jsonl
 .disk-cleanup/
 *.dcscan
+
+# 常见本地报告与实验恢复日志（可能含个人路径）
+baseline*.json
+current*.json
+report*.json
+.fixture-*.jsonl

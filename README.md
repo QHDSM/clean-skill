@@ -1,11 +1,11 @@
 # 磁盘清理 · clean-skill
 
-# 当前状态：只读预览
+## 当前状态：扫描与计划预览
 
 `clean.py --go` 已停用。旧 Shell 删除接口无法保证操作一定进入回收站；目录指纹也不能验证子孙文件。预览可有限查找 `.git` 标记，但不能代替风险审计或证明不存在 Git 数据。请勿把 dry-run 成功当作安全执行证明。扫描和计划预览仍可使用。
 
 
-面向 Windows 的 Agent Skill：分析全机磁盘占用，在一次明确授权内自主清理，并默认保留个人数据。
+面向 Windows 的 Agent Skill：分析磁盘占用、比较历史增长、识别 Git 数据风险，并生成和校验清理计划。真实执行正在实验验证，当前交付入口只做预览。
 
 **仓库名：`clean-skill`；技能调用名：`disk-cleanup`；许可证：MIT。**
 
@@ -66,7 +66,7 @@ Copy-Item -LiteralPath '.\disk-cleanup' -Destination $skillTarget -Recurse
 
 ```text
 使用 $disk-cleanup 清理整台电脑。
-先展示一次授权策略，批准后直接执行范围内的操作，不逐项询问。
+先展示候选、证据和授权策略，生成清理计划供预览。
 保留个人文件、下载、云同步、备份和回收站，排除 D:\Work。
 ```
 
@@ -76,25 +76,16 @@ Copy-Item -LiteralPath '.\disk-cleanup' -Destination $skillTarget -Recurse
 
 授权只对当前任务及明确范围有效。系统提权仍通过正常机制；不会绕过 UAC 或宿主权限。永久删除、关闭应用、重启等必须在授权中有明确选择。用户只要求分析时保持只读。
 
-## 执行清理（`clean.py`）
-
-`clean.py` 只接受 agent 产出的 `plan.json`，**默认 dry-run**：
+## 校验与预览计划（`clean.py`）
 
 ```powershell
-python disk-cleanup/scripts/clean.py --plan plan.json          # 只打印将要做什么
-python disk-cleanup/scripts/clean.py --plan plan.json --go     # 当前拒绝执行
-python disk-cleanup/scripts/clean.py --plan plan.json --go --json
+python disk-cleanup/scripts/clean.py --plan plan.json --json
+python disk-cleanup/scripts/clean.py --path 'D:\tmp\x' --confirm-path 'D:\tmp\x'
 ```
 
-单路径模式需要两次输入同一对象（验证「知道删什么」，不是「会打字」）：
+计划模式验证范围、排除项、指纹和所提供的证据。单路径模式只预览；双输入比较规范化后的路径字符串，不证明文件身份。`--go` 当前一律以退出码 2 拒绝，且不会写执行审计日志。实验模块未连接该入口。
 
-```powershell
-python disk-cleanup/scripts/clean.py --path 'D:\tmp\x' --confirm-path 'D:\tmp\x' --go
-```
-
-退出码：`0` 全部按要求处理；`2` 计划被门禁拒绝且**零执行**；`3` 计划通过但有目标被拒绝或失败。
-
-每次执行向 `~/.disk-cleanup/audit-YYYYMMDD.jsonl` 追加一条记录，含路径、结果、大小与指纹。日志只存本地，不要提交到仓库。
+退出码：`0` 表示预览完成，不代表目标安全或已经清理；`2` 表示参数/计划被拒绝；`3` 表示有目标在预览中被拒绝。结果含实际校验字节的完整 `plan_digest`，摘要不代表用户授权。
 
 ## 独立使用只读扫描工具
 
@@ -105,7 +96,11 @@ python disk-cleanup/scripts/scan.py --list-drives
 python disk-cleanup/scripts/scan.py 'C:\' 'D:\' --top 30 --format json
 python disk-cleanup/scripts/scan.py 'D:\Projects' --depth 2 --exclude 'D:\Projects\private'
 python disk-cleanup/scripts/scan.py 'D:\Downloads' --duplicates --min-size 10MiB
-python disk-cleanup/scripts/scan.py 'D:\Projects' --format json --output 'report.json'
+New-Item -ItemType Directory -Force reports | Out-Null
+python disk-cleanup/scripts/scan.py 'D:\Projects' --format json --output 'reports/baseline.json'
+# 之后保存同范围的新扫描，再比较
+python disk-cleanup/scripts/scan.py 'D:\Projects' --format json --output 'reports/current.json'
+python disk-cleanup/scripts/compare_scans.py reports/baseline.json reports/current.json
 ```
 
 | 参数 | 含义 |
@@ -116,6 +111,7 @@ python disk-cleanup/scripts/scan.py 'D:\Projects' --format json --output 'report
 | `--top N` | 展示最大的 N 个文件/目录，默认 20；不缩小扫描范围 |
 | `--min-size SIZE` | 大项展示和重复候选的最小大小，不改变总统计；支持 MiB/MB 等 |
 | `--exclude PATH` | 排除路径及其后代，可重复；相对路径以当前工作目录为准 |
+| `--allocation` | Windows 文件分配量观察，按文件 ID 去重硬链接；增加查询和内存开销 |
 | `--duplicates` | 显式读取候选内容并用 SHA-256 分组；可能耗时和占用较多内存 |
 | `--format text/json` | 默认文本；JSON 包含范围、统计、错误和完整性标记 |
 | `--output PATH` | 仅显式指定才写报告，父目录必须已存在，拒绝覆盖已有文件 |
@@ -139,12 +135,17 @@ python disk-cleanup/scripts/scan.py 'D:\Projects' --format json --output 'report
 python -m unittest discover -s disk-cleanup/tests -v
 ```
 
-测试使用临时目录，不清理真实电脑。共 60 项：
+默认测试使用自建临时目录；覆盖扫描、报告比较、计划门禁、Git 审计、Windows 身份和目录链、隔离、回滚及日志中断检查。Windows 实际回收测试默认跳过，符号链接等平台能力不足时也会跳过；以当前运行输出为准。
 
-- `test_scan.py`（14 项）：大小统计、范围/深度/排除、只读性质、JSON、报告防覆盖、重复识别、文件变化、访问失败、中断、硬链接、Windows 联接点。
-- `test_clean.py`（46 项）：计划门禁全部规则（schema、指纹、路径、action/risk、scope、排除项、Git 闸门）、preflight 保留路径、指纹重验（含 `st_ino` 为 0 的降级路径、读取后不误判为变化）、dry-run 不落地、单路径双输入确认。
+可选实机测试需要 Windows 和已安装的 pywin32，只操作测试自行创建的文件及目录；成功后恢复、校验并清理测试对象，失败时可能保留测试目录供检查：
 
-实际回收站执行尚不可用；测试不证明回收站行为，也不证明目录内容或 Git 数据安全。
+```powershell
+$env:DISK_CLEANUP_LIVE_RECYCLE_TEST = '1'
+python -m unittest discover -s disk-cleanup/tests -p test_recycle_live.py -v
+Remove-Item Env:DISK_CLEANUP_LIVE_RECYCLE_TEST
+```
+
+`DISK_CLEANUP_LIVE_TEST_PARENT` 可指定测试对象的现有父目录。测试不修改回收站设置或处理已有回收站项目。实机覆盖普通文件、嵌套目录、独占占用、逐项回调及程序主动取消；容量、策略、界面取消和断电等尚未完整验证。成功测试不等于正式清理能力已可用，详见[执行研究与缺口](disk-cleanup/references/recycle-research.md)。
 
 [Agent 行为场景](disk-cleanup/tests/behavior-scenarios.md) 是独立演练清单，不代表所有宿主 Agent 已完成行为验收。
 
