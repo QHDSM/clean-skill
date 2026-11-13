@@ -70,6 +70,8 @@ python scripts/git_audit.py '<仓库路径>' --format json
 
 Windows 下还可用 `python scripts/windows_identity.py '<路径>'` 采集句柄级卷序列号和 128 位文件 ID，放入 `evidence.windows_file_id` 供预览复核。身份匹配不是锁，也不证明文件内容、授权或后续路径不会改变。
 
+需比较父路径身份时，用 `python scripts/windows_parents.py '<目标路径>'` 采集完整链，放入 `evidence.windows_parent_chain`。预览会在持有句柄时复核父目录链，失败或改变时跳过；预览结束后释放句柄，不能声称路径仍被锁定。
+
 ```json
 {"schema":"disk-cleanup-plan/v1","authorization":{"scope":["C:\\"],"excluded":[]},
  "targets":[{"path":"C:\\...\\cache","action":"trash","risk":"safe",

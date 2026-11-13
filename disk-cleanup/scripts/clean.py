@@ -39,6 +39,7 @@ import scan  # reuse check_path / unsafe / fingerprint; read-only helpers only
 import git_discovery
 import tree_evidence
 import windows_identity
+import windows_parents
 
 SCHEMA = 'disk-cleanup-plan/v1'
 ACTIONS = {'trash', 'keep', 'report'}
@@ -155,6 +156,12 @@ def load_plan_with_digest(path):
             raise GateError(f'{where}.evidence.fingerprint must be 5 integers')
         if not all(isinstance(x, int) and not isinstance(x, bool) for x in fp):
             raise GateError(f'{where}.evidence.fingerprint must be 5 integers')
+        parents = evidence.get('windows_parent_chain')
+        if parents is not None:
+            try:
+                windows_parents.validate(path_value, parents)
+            except (OSError, ValueError) as exc:
+                raise GateError(f'{where}.evidence.windows_parent_chain: {exc}')
         file_id = evidence.get('windows_file_id')
         if file_id is not None:
             if (not isinstance(file_id, dict) or file_id.get('schema') != windows_identity.SCHEMA
@@ -401,6 +408,18 @@ def run(args):
                 continue
             entry['windows_file_id_comparison'] = 'matched'
 
+        parents = target['evidence'].get('windows_parent_chain')
+        if parents is not None:
+            try:
+                expected_chain = windows_parents.validate(path, parents)
+                with windows_parents.PinnedParents(Path(path).parent, expected_chain):
+                    entry['windows_parent_chain_comparison'] = 'matched_at_inspection'
+            except (OSError, ValueError) as exc:
+                entry.update(result='skipped', detail=f'Windows parent chain unavailable or changed: {exc}')
+                skipped.append(entry)
+                results.append(entry)
+                continue
+
         tree = target['evidence'].get('tree_metadata')
         if tree is not None:
             current_tree = tree_evidence.capture(path)
@@ -491,6 +510,8 @@ def render(report):
             lines.append('             Directory contents not verified by fingerprint')
         if item.get('windows_file_id_comparison') == 'matched':
             lines.append('             Windows file identity matched at inspection time')
+        if item.get('windows_parent_chain_comparison') == 'matched_at_inspection':
+            lines.append('             Windows parent identities matched; inspection handles released')
         comparison = item.get('tree_metadata_comparison')
         if comparison and comparison.get('matched'):
             lines.append('             Tree metadata matched; contents and concurrent changes remain unverified')

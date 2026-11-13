@@ -22,6 +22,7 @@ import clean  # noqa: E402
 import scan   # noqa: E402
 import tree_evidence  # noqa: E402
 import windows_identity  # noqa: E402
+import windows_parents  # noqa: E402
 
 
 def fingerprint_of(path):
@@ -463,6 +464,41 @@ class RunTests(unittest.TestCase):
             report = self.run_plan(self.factory.plan([target]))
         self.assertEqual(report['summary']['skipped'], 1)
         self.assertIn('identity unavailable', report['results'][0]['detail'])
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows parent identity test')
+    def test_parent_chain_rejects_replaced_parent_with_same_file(self):
+        parent = self.cache / 'parent'
+        parent.mkdir()
+        blob = parent / 'data'
+        blob.write_bytes(b'owned')
+        target = self.factory.target(blob)
+        target['evidence']['windows_parent_chain'] = windows_parents.capture(blob)
+        report = self.run_plan(self.factory.plan([target]))
+        self.assertEqual(report['results'][0]['windows_parent_chain_comparison'], 'matched_at_inspection')
+        parent.rename(self.cache / 'old-parent')
+        parent.mkdir()
+        (self.cache / 'old-parent' / 'data').rename(blob)
+        report = self.run_plan(self.factory.plan([target]))
+        self.assertEqual(report['summary']['skipped'], 1)
+        self.assertIn('parent chain', report['results'][0]['detail'])
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows parent identity test')
+    def test_incomplete_parent_evidence_rejects_plan(self):
+        target = self.factory.target(self.cache)
+        evidence = windows_parents.capture(self.cache)
+        evidence['parents'] = evidence['parents'][:-1]
+        target['evidence']['windows_parent_chain'] = evidence
+        with self.assertRaisesRegex(clean.GateError, 'complete ordered chain'):
+            self.run_plan(self.factory.plan([target]))
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows parent identity test')
+    def test_parent_chain_read_error_skips_target(self):
+        target = self.factory.target(self.cache)
+        target['evidence']['windows_parent_chain'] = windows_parents.capture(self.cache)
+        with patch.object(windows_parents.PinnedParents, '__enter__', side_effect=OSError('denied')):
+            report = self.run_plan(self.factory.plan([target]))
+        self.assertEqual(report['summary']['skipped'], 1)
+        self.assertIn('denied', report['results'][0]['detail'])
 
     def test_denied_target_is_refused(self):
         target = self.factory.target(self.cache)
