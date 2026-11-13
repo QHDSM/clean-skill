@@ -20,13 +20,28 @@ class RenameInfo(ctypes.Structure):
 class PinnedParents:
     """Hold checked directory ancestors without delete sharing during a test.
 
-    This pins current directory objects, not historical plan identities. Handles
-    are released when leaving the context, including when preparation fails.
+    An expected chain, when supplied, must match every current parent identity.
+    Handles are released on context exit, including when preparation fails.
     """
-    def __init__(self, parent):
+    def __init__(self, parent, expected_chain=None):
         self.parent = Path(os.path.abspath(parent))
         self.handles = []
         self.kernel = None
+        self.identities = []
+        self.expected_chain = None
+        if expected_chain is not None:
+            if not isinstance(expected_chain, list) or not expected_chain:
+                raise ValueError('parent chain must be a non-empty list')
+            self.expected_chain = []
+            for row in expected_chain:
+                if (not isinstance(row, dict) or set(row) != {'path', 'volume_serial', 'file_id'}
+                        or not isinstance(row['path'], str) or not Path(row['path']).is_absolute()
+                        or type(row['volume_serial']) is not int or not 0 < row['volume_serial'] < (1 << 64)
+                        or not isinstance(row['file_id'], str) or len(row['file_id']) != 32
+                        or any(c not in '0123456789abcdef' for c in row['file_id'])
+                        or row['file_id'] == '0' * 32):
+                    raise ValueError('invalid parent identity evidence')
+                self.expected_chain.append({**row, 'path': scan.normalized(row['path'])})
 
     def __enter__(self):
         if os.name != 'nt':
@@ -55,6 +70,16 @@ class PinnedParents:
                     raise ctypes.WinError(ctypes.get_last_error())
                 if not attrs.attributes & 0x10 or attrs.attributes & (scan.REPARSE | scan.OFFLINE | scan.RECALL):
                     raise ValueError('unsafe parent directory: ' + str(directory))
+                identity = windows_identity.FileIdInfo()
+                if not kernel.GetFileInformationByHandleEx(handle, 18, ctypes.byref(identity), ctypes.sizeof(identity)):
+                    raise ctypes.WinError(ctypes.get_last_error())
+                if not identity.volume_serial or not any(identity.file_id):
+                    raise ValueError('parent identity unavailable')
+                self.identities.append({'path': scan.normalized(directory),
+                                        'volume_serial': identity.volume_serial,
+                                        'file_id': bytes(identity.file_id).hex()})
+            if self.expected_chain is not None and self.identities != self.expected_chain:
+                raise ValueError('parent chain identity changed')
             return self
         except BaseException:
             self.__exit__(None, None, None)
@@ -63,6 +88,12 @@ class PinnedParents:
     def __exit__(self, *_):
         while self.handles:
             self.kernel.CloseHandle(self.handles.pop())
+
+
+def capture_parent_chain(source):
+    """Capture current pinned parent identities for a later fixture transaction."""
+    with PinnedParents(Path(os.path.abspath(source)).parent) as parents:
+        return [dict(row) for row in parents.identities]
 
 
 def stage_fixture(source, expected, new_name):

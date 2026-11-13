@@ -1,6 +1,6 @@
 """Fixture-only staging/recovery experiment; not connected to clean.py.
 
-No authorization, historical parent identity binding or automatic crash recovery is
+No authorization or automatic crash recovery is
 implemented. Never call this on user data or treat results as a cleanup success.
 """
 import os
@@ -12,8 +12,10 @@ import windows_identity
 import journal_experimental
 
 
-def run_fixture(source, expected, backend, *, journal_path=None):
+def run_fixture(source, expected, backend, *, parent_chain, journal_path=None):
     source = Path(os.path.abspath(source))
+    if not isinstance(parent_chain, list) or not parent_chain:
+        return {'status': 'PARENT_PIN_FAILED', 'source': str(source), 'detail': 'parent chain evidence required'}
     token = uuid.uuid4().hex
     journal_path = Path(journal_path) if journal_path else source.parent / ('.fixture-' + token + '.jsonl')
     try:
@@ -22,8 +24,8 @@ def run_fixture(source, expected, backend, *, journal_path=None):
         return {'status': 'JOURNAL_FAILED', 'source': str(source), 'detail': str(exc)}
     try:
         try:
-            with stage_experimental.PinnedParents(source.parent):
-                result = _run_fixture(source, expected, backend, journal, token)
+            with stage_experimental.PinnedParents(source.parent, expected_chain=parent_chain) as parents:
+                result = _run_fixture(source, expected, backend, journal, token, parents.identities)
         except (OSError, ValueError) as exc:
             result = {'status': 'PARENT_PIN_FAILED', 'source': str(source), 'detail': str(exc)}
         return {**result, 'journal': str(journal_path)}
@@ -31,7 +33,7 @@ def run_fixture(source, expected, backend, *, journal_path=None):
         journal.close()
 
 
-def _run_fixture(source, expected, backend, journal, token):
+def _run_fixture(source, expected, backend, journal, token, parent_chain):
     """Stage an owned fixture, call an injected backend, and attempt safe recovery.
 
     `backend` is injected by the test and must not be used with real user files.
@@ -40,7 +42,8 @@ def _run_fixture(source, expected, backend, journal, token):
     source = Path(os.path.abspath(source))
     staged_name = '.disk-cleanup-fixture-' + token
     try:
-        journal.append('INTENT', source=str(source), staged=str(source.with_name(staged_name)), identity=expected)
+        journal.append('INTENT', source=str(source), staged=str(source.with_name(staged_name)),
+                       identity=expected, parent_chain=parent_chain)
     except OSError as exc:
         return {'status': 'JOURNAL_FAILED', 'source': str(source), 'detail': str(exc)}
     try:

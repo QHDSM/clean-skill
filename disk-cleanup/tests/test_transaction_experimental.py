@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 import transaction_experimental
 import windows_identity
 import journal_experimental
+import stage_experimental
 
 
 @unittest.skipUnless(os.name == 'nt', 'Windows handle staging test')
@@ -21,12 +22,16 @@ class TransactionTests(unittest.TestCase):
         self.source = self.root / 'fixture'
         self.source.write_bytes(b'original fixture')
         self.identity = windows_identity.capture(self.source)
+        self.parent_chain = stage_experimental.capture_parent_chain(self.source)
+
+    def run_fixture(self, backend):
+        return transaction_experimental.run_fixture(self.source, self.identity, backend, parent_chain=self.parent_chain)
 
     def test_backend_failure_restores_original(self):
         def fail(path):
             self.assertEqual(path.read_bytes(), b'original fixture')
             raise OSError('simulated failure')
-        result = transaction_experimental.run_fixture(self.source, self.identity, fail)
+        result = self.run_fixture(fail)
         self.assertEqual(result['status'], 'RESTORED')
         self.assertEqual(self.source.read_bytes(), b'original fixture')
         self.assertFalse(Path(result['staged']).exists())
@@ -35,7 +40,7 @@ class TransactionTests(unittest.TestCase):
         def create_collision(path):
             self.source.write_bytes(b'new object')
             raise OSError('simulated failure')
-        result = transaction_experimental.run_fixture(self.source, self.identity, create_collision)
+        result = self.run_fixture(create_collision)
         self.assertEqual(result['status'], 'RECOVERY_REQUIRED')
         self.assertEqual(self.source.read_bytes(), b'new object')
         self.assertEqual(Path(result['staged']).read_bytes(), b'original fixture')
@@ -44,7 +49,7 @@ class TransactionTests(unittest.TestCase):
         def replace_stage(path):
             path.rename(self.root / 'preserved-original')
             path.write_bytes(b'replacement')
-        result = transaction_experimental.run_fixture(self.source, self.identity, replace_stage)
+        result = self.run_fixture(replace_stage)
         self.assertEqual(result['status'], 'RECOVERY_REQUIRED')
         self.assertFalse(self.source.exists())
         self.assertEqual(Path(result['staged']).read_bytes(), b'replacement')
@@ -53,19 +58,19 @@ class TransactionTests(unittest.TestCase):
     def test_missing_stage_is_unknown(self):
         def move_elsewhere(path):
             path.rename(self.root / 'elsewhere')
-        result = transaction_experimental.run_fixture(self.source, self.identity, move_elsewhere)
+        result = self.run_fixture(move_elsewhere)
         self.assertEqual(result['status'], 'UNKNOWN')
         self.assertEqual((self.root / 'elsewhere').read_bytes(), b'original fixture')
 
     def test_post_restore_identity_error_is_unknown(self):
         with patch.object(windows_identity, 'capture', side_effect=OSError('unavailable')):
-            result = transaction_experimental.run_fixture(self.source, self.identity, lambda path: None)
+            result = self.run_fixture(lambda path: None)
         self.assertEqual(result['status'], 'RECOVERY_UNKNOWN')
         self.assertEqual(self.source.read_bytes(), b'original fixture')
 
     def test_journal_sync_failure_prevents_staging(self):
         with patch.object(journal_experimental.os, 'fsync', side_effect=OSError('disk error')):
-            result = transaction_experimental.run_fixture(self.source, self.identity, lambda path: self.fail('backend ran'))
+            result = self.run_fixture(lambda path: self.fail('backend ran'))
         self.assertEqual(result['status'], 'JOURNAL_FAILED')
         self.assertEqual(self.source.read_bytes(), b'original fixture')
 
@@ -73,8 +78,8 @@ class TransactionTests(unittest.TestCase):
         journal = self.root / 'crash.jsonl'
         code = '''import os,sys
 sys.path.insert(0, sys.argv[1])
-import transaction_experimental,windows_identity
-transaction_experimental.run_fixture(sys.argv[2],windows_identity.capture(sys.argv[2]),lambda path: os._exit(71),journal_path=sys.argv[3])
+import transaction_experimental,windows_identity,stage_experimental
+transaction_experimental.run_fixture(sys.argv[2],windows_identity.capture(sys.argv[2]),lambda path: os._exit(71),journal_path=sys.argv[3],parent_chain=stage_experimental.capture_parent_chain(sys.argv[2]))
 '''
         proc = subprocess.run([sys.executable, '-c', code,
                                str(Path(__file__).resolve().parents[1] / 'scripts'),
@@ -100,10 +105,35 @@ transaction_experimental.run_fixture(sys.argv[2],windows_identity.capture(sys.ar
         def attempt_parent_rename(path):
             with self.assertRaises(OSError):
                 parent.rename(self.root / 'moved')
-        result = transaction_experimental.run_fixture(source, windows_identity.capture(source), attempt_parent_rename)
+        result = transaction_experimental.run_fixture(source, windows_identity.capture(source), attempt_parent_rename, parent_chain=stage_experimental.capture_parent_chain(source))
         self.assertEqual(result['status'], 'RESTORED')
         parent.rename(self.root / 'moved')
         self.assertEqual((self.root / 'moved' / 'fixture').read_bytes(), b'owned')
+
+    def test_changed_parent_rejected_even_when_leaf_identity_is_unchanged(self):
+        parent = self.root / 'parent'
+        parent.mkdir()
+        source = parent / 'fixture'
+        source.write_bytes(b'owned')
+        expected = windows_identity.capture(source)
+        parents = stage_experimental.capture_parent_chain(source)
+        parent.rename(self.root / 'old-parent')
+        parent.mkdir()
+        (self.root / 'old-parent' / 'fixture').rename(source)
+        self.assertEqual(windows_identity.capture(source)['file_id'], expected['file_id'])
+        result = transaction_experimental.run_fixture(source, expected,
+                    lambda path: self.fail('backend ran'), parent_chain=parents)
+        self.assertEqual(result['status'], 'PARENT_PIN_FAILED')
+        self.assertEqual(source.read_bytes(), b'owned')
+        parent.rename(self.root / 'released-parent')
+
+    def test_missing_or_partial_parent_chain_is_rejected(self):
+        for evidence in (None, [], self.parent_chain[:-1]):
+            with self.subTest(evidence=evidence):
+                result = transaction_experimental.run_fixture(self.source, self.identity,
+                    lambda path: self.fail('backend ran'), parent_chain=evidence)
+                self.assertEqual(result['status'], 'PARENT_PIN_FAILED')
+                self.assertEqual(self.source.read_bytes(), b'original fixture')
 
 
 if __name__ == '__main__':
