@@ -37,6 +37,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import scan  # reuse check_path / unsafe / fingerprint; read-only helpers only
 import git_discovery
+import tree_evidence
 
 SCHEMA = 'disk-cleanup-plan/v1'
 ACTIONS = {'trash', 'keep', 'report'}
@@ -137,6 +138,16 @@ def load_plan(path):
             raise GateError(f'{where}.evidence.fingerprint must be 5 integers')
         if not all(isinstance(x, int) and not isinstance(x, bool) for x in fp):
             raise GateError(f'{where}.evidence.fingerprint must be 5 integers')
+        tree = evidence.get('tree_metadata')
+        if tree is not None:
+            if (not isinstance(tree, dict) or tree.get('schema') != tree_evidence.SCHEMA
+                    or tree.get('complete') is not True
+                    or not isinstance(tree.get('root'), str)
+                    or not _has_drive(tree['root'])
+                    or scan.normalized(tree['root']) != scan.normalized(path_value)
+                    or not isinstance(tree.get('digest'), str)
+                    or not re.fullmatch(r'[0-9a-f]{64}', tree['digest'])):
+                raise GateError(f'{where}.evidence.tree_metadata must be complete and match the target')
 
         # Scope containment and exclusion are checked here so a bad plan runs nothing.
         if not any(scan.within(path_value, root) for root in scope):
@@ -342,6 +353,18 @@ def run(args):
             results.append(entry)
             continue
 
+        tree = target['evidence'].get('tree_metadata')
+        if tree is not None:
+            current_tree = tree_evidence.capture(path)
+            if not current_tree['complete'] or current_tree['digest'] != tree['digest']:
+                entry.update(result='skipped', detail='directory metadata changed or comparison incomplete',
+                             tree_metadata_comparison=current_tree)
+                skipped.append(entry)
+                results.append(entry)
+                continue
+            entry['tree_metadata_comparison'] = {'matched': True,
+                                                  'entries': current_tree['entries']}
+
         entry['size_bytes'] = target['evidence'].get('size_bytes')
         entry['fingerprint'] = target['evidence']['fingerprint']
         entry['git_discovery'] = git_discovery.discover(path)
@@ -418,6 +441,9 @@ def render(report):
                 lines.append('             Git discovery incomplete: ' + '; '.join(discovery['issues']))
         if item.get('directory_contents_verified') is False:
             lines.append('             Directory contents not verified by fingerprint')
+        comparison = item.get('tree_metadata_comparison')
+        if comparison and comparison.get('matched'):
+            lines.append('             Tree metadata matched; contents and concurrent changes remain unverified')
         if item.get('detail') and item['result'] != 'dry_run':
             lines.append('             ↳ %s' % item['detail'])
     if report['volumes']:

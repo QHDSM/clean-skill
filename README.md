@@ -26,6 +26,7 @@
 | `scripts/scan.py` | 只读扫描、分类、重复文件检测 | **无任何删除能力** |
 | `scripts/clean.py` | 校验并预览 `plan.json` | 执行已停用 |
 | `scripts/git_audit.py` | 只读 Git 风险审计 | 无 |
+| `scripts/tree_evidence.py` | 有限采集目录树元数据，供计划预览比较 | 无 |
 
 `clean.py` 的安全边界（在代码里，不在文档里）：
 

@@ -36,8 +36,11 @@
 | `evidence.size_bytes` | integer | ❌ | 扫描时的逻辑大小；用于报告估算收益 |
 | `evidence.fingerprint` | integer[5] | ✅ | `[st_dev, st_ino, st_size, st_mtime_ns, st_ctime_ns]`；比对时只用前四项 |
 | `evidence.git` | object\|null | ❌ | `git_audit.py` 的结论 |
+| `evidence.tree_metadata` | object\|null | ❌ | `tree_evidence.py` 对同一目录生成的完整结果；用于预览时比较 |
 
 `scan.py --format json` 返回的 `largest_files`、`largest_directories` 每项含扫描时取得的 `fingerprint`，可直接复制到对应路径的 `evidence.fingerprint`。目录指纹记录的是目录自身在遍历开始时的状态，不代表递归内容快照，也不保证聚合大小与该指纹同时成立。扫描不是原子快照，创建计划时重新取值不能声称是扫描时证据。
+
+对需要比较内部变化的目录，可先运行 `python scripts/tree_evidence.py '<目录绝对路径>'`，将完整 JSON 对象放入该目标的 `evidence.tree_metadata`。预览会重新采集并比较；采集不完整或摘要不一致时跳过该目标。采集只读取相对路径、类型、设备、文件标识、逻辑大小和修改时间，不读取文件内容；默认上限 100000 项、约 30 秒（单次系统调用可能超过）。遇到链接、重解析点、跨文件系统、权限错误或上限会返回 `complete: false`，不能作为证据。该比较不是原子快照，不保证识别保留元数据的内容修改，也无法消除并发变化或路径替换；匹配不意味着安全、授权或可执行。
 
 ### action 语义
 

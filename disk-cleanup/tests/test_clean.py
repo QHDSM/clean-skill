@@ -18,6 +18,7 @@ sys.path.insert(0, str(HERE.parent / 'scripts'))
 
 import clean  # noqa: E402
 import scan   # noqa: E402
+import tree_evidence  # noqa: E402
 
 
 def fingerprint_of(path):
@@ -383,6 +384,26 @@ class RunTests(unittest.TestCase):
         Path(candidate['path']).write_bytes(b'changed after scan')
         report = self.run_plan(self.factory.plan([target]))
         self.assertEqual(report['summary']['skipped'], 1)
+
+    def test_tree_evidence_detects_nested_change(self):
+        folder = self.cache / 'nested'
+        folder.mkdir()
+        item = folder / 'data'
+        item.write_bytes(b'old')
+        target = self.factory.target(self.cache)
+        target['evidence']['tree_metadata'] = tree_evidence.capture(self.cache)
+        before = self.run_plan(self.factory.plan([target]))
+        self.assertTrue(before['results'][0]['tree_metadata_comparison']['matched'])
+        item.write_bytes(b'changed nested content')
+        after = self.run_plan(self.factory.plan([target]))
+        self.assertEqual(after['summary']['skipped'], 1)
+        self.assertIn('directory metadata', after['results'][0]['detail'])
+
+    def test_incomplete_tree_evidence_rejected(self):
+        target = self.factory.target(self.cache)
+        target['evidence']['tree_metadata'] = tree_evidence.capture(self.cache, max_entries=1)
+        with self.assertRaisesRegex(clean.GateError, 'tree_metadata'):
+            self.run_plan(self.factory.plan([target]))
 
     def test_denied_target_is_refused(self):
         target = self.factory.target(self.cache)

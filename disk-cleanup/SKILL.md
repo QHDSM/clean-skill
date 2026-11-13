@@ -7,7 +7,7 @@ description: Analyze Windows disk usage and carry out scoped cleanup after one t
 
 帮助用户找出占用来源，在一次明确授权内自主完成清理，核实实际收益。Windows 优先；其他系统仅提供明确适用的分析，不套用 Windows 命令。
 
-**当前版本只支持扫描和计划预览。** `clean.py --go` 已停用：旧 Windows Shell 接口不能保证仅回收而不永久删除。不要用其他删除命令绕过这个限制。目录指纹不能证明子孙文件未变；预览中的 Git 发现只是有上限的线索，不能证明不存在仓库或本地数据，也不能代替 Git 审计。
+**当前版本只支持扫描和计划预览。** `clean.py --go` 已停用：旧 Windows Shell 接口不能保证仅回收而不永久删除。不要用其他删除命令绕过这个限制。目录指纹不能证明子孙文件未变；可选的目录树元数据比较也不是原子快照。预览中的 Git 发现只是有上限的线索，不能证明不存在仓库或本地数据，也不能代替 Git 审计。
 
 ## 1. 确定范围
 
@@ -61,6 +61,8 @@ python scripts/git_audit.py '<仓库路径>' --format json
 ## 4. 把执行意图写成计划
 
 授权确认后先产出 `plan.json` 用于预览，不要直接调删除命令。扫描 JSON 的 `largest_files` 和 `largest_directories` 条目含 `fingerprint`；将对应条目原样放入 `evidence.fingerprint`，不要用计划生成时的状态冒充扫描时证据。每项还须带 `path`、`action`、`risk`、`reason`。指纹是 `(dev, ino, size, mtime_ns, ctime_ns)`，比对时忽略 `ctime`；它不覆盖目录内部。未出现在 top 列表的对象需单独采集证据并如实标明时间。完整字段见 [计划格式](references/plan-schema.md)。
+
+需要比较目录内部时，可用 `python scripts/tree_evidence.py '<目录>'` 采集只读元数据，把完整结果填入 `evidence.tree_metadata`。预览会在数据不匹配或采集不完整时跳过；匹配不能证明内容一致或没有并发变化。
 
 ```json
 {"schema":"disk-cleanup-plan/v1","authorization":{"scope":["C:\\"],"excluded":[]},
