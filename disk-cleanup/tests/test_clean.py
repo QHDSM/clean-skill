@@ -160,6 +160,15 @@ class GateTests(unittest.TestCase):
         target = self.factory.target(self.victim, path='cache/blob.bin')
         self.assert_gate(self.factory.plan([target]), 'must be an absolute drive path')
 
+    def test_rejects_special_windows_spelling_in_scope_exclusion_and_target(self):
+        target = self.factory.target(self.victim)
+        for scope in ['C:\\Windows.', 'C:\\folder\\..']:
+            self.assert_gate(self.factory.plan([target], authorization={'scope': [scope]}), 'absolute drive path')
+        self.assert_gate(self.factory.plan([target], authorization={'excluded': ['C:\\private.']}),
+                         'absolute drive paths')
+        target['path'] = 'C:\\cache:stream'
+        self.assert_gate(self.factory.plan([target]), 'absolute drive path')
+
     def test_rejects_unknown_action(self):
         target = self.factory.target(self.victim, action='delete')
         self.assert_gate(self.factory.plan([target]), 'action must be one of')

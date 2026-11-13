@@ -13,6 +13,7 @@ import scan
 import tree_evidence
 import windows_identity
 import windows_parents
+import windows_paths
 
 
 def collect(path, *, tree=False):
@@ -26,6 +27,7 @@ def collect(path, *, tree=False):
     try:
         if os.name != 'nt' or not Path(path).is_absolute():
             raise ValueError('an absolute Windows path is required')
+        windows_paths.require(str(path))
         path = scan.check_path(path)
         result['path'] = str(path)
         with windows_parents.PinnedParents(path.parent) as parents:

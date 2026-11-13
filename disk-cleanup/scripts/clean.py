@@ -40,6 +40,7 @@ import git_discovery
 import tree_evidence
 import windows_identity
 import windows_parents
+import windows_paths
 
 SCHEMA = 'disk-cleanup-plan/v1'
 ACTIONS = {'trash', 'keep', 'report'}
@@ -216,7 +217,7 @@ def load_plan(path):
 
 
 def _has_drive(value):
-    return '\x00' not in value and bool(re.match(r'^[a-zA-Z]:[\\/]', value)) and len(value) >= 3
+    return windows_paths.supported(value)
 
 
 # ----------------------------------------------------------------------- preflight
@@ -347,6 +348,10 @@ def run(args):
         targets = plan['targets']
     else:
         # Single-path mode: double entry proves the operator knows the exact target.
+        if args.path and not _has_drive(args.path):
+            raise GateError('--path must use a supported absolute drive path')
+        if args.confirm_path and not _has_drive(args.confirm_path):
+            raise GateError('--confirm-path must use a supported absolute drive path')
         first, second = Path(args.path), Path(args.confirm_path or '')
         if not args.confirm_path:
             raise GateError('--path requires --confirm-path with the same absolute path')

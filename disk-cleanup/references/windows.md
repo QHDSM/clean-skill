@@ -1,5 +1,7 @@
 # Windows：存储、权限和执行
 
+计划与统一证据采集拒绝含特殊 Win32 语义的路径拼写，包括尾部点/空格、设备名和备用数据流。规则参考 [Microsoft 文件命名文档](https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file)。不要把这些输入静默改写为另一个可接受路径；核实实际目标后使用普通完整路径。词法校验不解决所有路径别名，尤其不解析 8.3 短名称。
+
 扫描器可用 `--allocation` 查询 [FILE_STANDARD_INFO](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_standard_info) 的文件分配量，结合句柄级文件 ID 去重。结果是遍历期间文件系统报告的文件分配量，不是整个卷的物理用量或可回收空间；目录、元数据和共享存储等不能据此精确归因。查看 `allocation_observation.complete`，不完整时仅报告观察部分，`allocated_bytes` 和可释放字节仍为未知。
 
 ## 先检查
