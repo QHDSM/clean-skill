@@ -68,6 +68,8 @@ python scripts/git_audit.py '<仓库路径>' --format json
 
 需要比较目录内部时，可用 `python scripts/tree_evidence.py '<目录>'` 采集只读元数据，把完整结果填入 `evidence.tree_metadata`。预览会在数据不匹配或采集不完整时跳过；匹配不能证明内容一致或没有并发变化。
 
+Windows 下还可用 `python scripts/windows_identity.py '<路径>'` 采集句柄级卷序列号和 128 位文件 ID，放入 `evidence.windows_file_id` 供预览复核。身份匹配不是锁，也不证明文件内容、授权或后续路径不会改变。
+
 ```json
 {"schema":"disk-cleanup-plan/v1","authorization":{"scope":["C:\\"],"excluded":[]},
  "targets":[{"path":"C:\\...\\cache","action":"trash","risk":"safe",

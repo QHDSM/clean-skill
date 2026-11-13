@@ -38,6 +38,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import scan  # reuse check_path / unsafe / fingerprint; read-only helpers only
 import git_discovery
 import tree_evidence
+import windows_identity
 
 SCHEMA = 'disk-cleanup-plan/v1'
 ACTIONS = {'trash', 'keep', 'report'}
@@ -154,6 +155,18 @@ def load_plan_with_digest(path):
             raise GateError(f'{where}.evidence.fingerprint must be 5 integers')
         if not all(isinstance(x, int) and not isinstance(x, bool) for x in fp):
             raise GateError(f'{where}.evidence.fingerprint must be 5 integers')
+        file_id = evidence.get('windows_file_id')
+        if file_id is not None:
+            if (not isinstance(file_id, dict) or file_id.get('schema') != windows_identity.SCHEMA
+                    or not isinstance(file_id.get('path'), str)
+                    or not _has_drive(file_id['path'])
+                    or scan.normalized(file_id['path']) != scan.normalized(path_value)
+                    or type(file_id.get('volume_serial')) is not int
+                    or not 0 < file_id['volume_serial'] < (1 << 64)
+                    or not isinstance(file_id.get('file_id'), str)
+                    or not re.fullmatch(r'[0-9a-f]{32}', file_id['file_id'])
+                    or file_id['file_id'] == '0' * 32):
+                raise GateError(f'{where}.evidence.windows_file_id must match the target')
         tree = evidence.get('tree_metadata')
         if tree is not None:
             if (not isinstance(tree, dict) or tree.get('schema') != tree_evidence.SCHEMA
@@ -372,6 +385,22 @@ def run(args):
             results.append(entry)
             continue
 
+        file_id = target['evidence'].get('windows_file_id')
+        if file_id is not None:
+            try:
+                current_id = windows_identity.capture(path)
+            except (OSError, ValueError) as exc:
+                entry.update(result='skipped', detail=f'Windows file identity unavailable: {exc}')
+                skipped.append(entry)
+                results.append(entry)
+                continue
+            if (current_id['volume_serial'], current_id['file_id']) != (file_id['volume_serial'], file_id['file_id']):
+                entry.update(result='skipped', detail='Windows file identity changed')
+                skipped.append(entry)
+                results.append(entry)
+                continue
+            entry['windows_file_id_comparison'] = 'matched'
+
         tree = target['evidence'].get('tree_metadata')
         if tree is not None:
             current_tree = tree_evidence.capture(path)
@@ -460,6 +489,8 @@ def render(report):
                 lines.append('             Git discovery incomplete: ' + '; '.join(discovery['issues']))
         if item.get('directory_contents_verified') is False:
             lines.append('             Directory contents not verified by fingerprint')
+        if item.get('windows_file_id_comparison') == 'matched':
+            lines.append('             Windows file identity matched at inspection time')
         comparison = item.get('tree_metadata_comparison')
         if comparison and comparison.get('matched'):
             lines.append('             Tree metadata matched; contents and concurrent changes remain unverified')

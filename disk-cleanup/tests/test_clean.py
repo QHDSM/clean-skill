@@ -21,6 +21,7 @@ sys.path.insert(0, str(HERE.parent / 'scripts'))
 import clean  # noqa: E402
 import scan   # noqa: E402
 import tree_evidence  # noqa: E402
+import windows_identity  # noqa: E402
 
 
 def fingerprint_of(path):
@@ -437,6 +438,31 @@ class RunTests(unittest.TestCase):
         target['evidence']['tree_metadata'] = tree_evidence.capture(self.cache, max_entries=1)
         with self.assertRaisesRegex(clean.GateError, 'tree_metadata'):
             self.run_plan(self.factory.plan([target]))
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows file identity test')
+    def test_windows_identity_detects_path_replacement(self):
+        blob = self.cache / 'blob.bin'
+        target = self.factory.target(blob)
+        target['evidence']['fingerprint'][1] = 0  # simulate unavailable st_ino
+        target['evidence']['windows_file_id'] = windows_identity.capture(blob)
+        before = self.run_plan(self.factory.plan([target]))
+        self.assertEqual(before['results'][0]['windows_file_id_comparison'], 'matched')
+        blob.rename(self.cache / 'old.bin')
+        blob.write_bytes(b'x' * 256)
+        os.utime(blob, ns=(os.stat(blob).st_atime_ns, target['evidence']['fingerprint'][3]))
+        after = self.run_plan(self.factory.plan([target]))
+        self.assertEqual(after['summary']['skipped'], 1)
+        self.assertIn('identity changed', after['results'][0]['detail'])
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows file identity test')
+    def test_windows_identity_unavailable_skips_target(self):
+        blob = self.cache / 'blob.bin'
+        target = self.factory.target(blob)
+        target['evidence']['windows_file_id'] = windows_identity.capture(blob)
+        with patch.object(windows_identity, 'capture', side_effect=OSError('unavailable')):
+            report = self.run_plan(self.factory.plan([target]))
+        self.assertEqual(report['summary']['skipped'], 1)
+        self.assertIn('identity unavailable', report['results'][0]['detail'])
 
     def test_denied_target_is_refused(self):
         target = self.factory.target(self.cache)
