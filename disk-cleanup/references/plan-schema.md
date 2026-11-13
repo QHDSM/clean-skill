@@ -21,7 +21,7 @@
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
 | `scope` | string[] | ✅ | 非空；每项必须是带盘符的绝对路径（如 `C:\`、`D:\Projects`） |
-| `excluded` | string[] | ❌ | 与排除根有祖先或后代关系的目标均拒绝；优先于 `scope` |
+| `excluded` | string[] | ❌ | 带盘符的绝对路径；与排除根有祖先或后代关系的目标均拒绝；优先于 `scope` |
 | `permanent_delete` | boolean | ❌ | 必须为 `false` 或省略。本执行器不做永久删除 |
 | `git_acknowledged` | boolean | ❌ | 见「Git 风险」一节 |
 
@@ -86,6 +86,8 @@
 | `UNVERIFIED` | 证据不足（无 remote 或检查失败） | 不能按安全处理 |
 
 ## 门禁规则（任一不过 → 退出码 2，零执行）
+
+计划必须是 UTF-8 JSON；重复键、非标准数字常量和错误的布尔类型会被拒绝。报告中的 `plan_digest` 为同一次读取并实际校验的原始字节的完整 SHA-256；它只是内容标识，不代表用户授权或计划不可被修改。
 
 1. `schema` 必须精确匹配。
 2. `authorization.scope` 非空，且每项带盘符。

@@ -7,11 +7,13 @@ behaviour needs a real Windows machine; see the note in the test module docstrin
 of test_scan.py for the same limitation.
 """
 import json
+import hashlib
 import os
 from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / 'scripts'))
@@ -99,6 +101,27 @@ class GateTests(unittest.TestCase):
         plan = self.factory.plan([self.factory.target(self.victim)],
                                  authorization={'permanent_delete': True})
         self.assert_gate(plan, 'never performs permanent deletion')
+
+    def test_rejects_false_like_invalid_authorization(self):
+        plan = self.factory.plan([self.factory.target(self.victim)])
+        for key, value in [('permanent_delete', 0), ('git_acknowledged', 'false'),
+                           ('excluded', None), ('excluded', ['relative'])]:
+            with self.subTest(key=key, value=value):
+                modified = json.loads(json.dumps(plan))
+                modified['authorization'][key] = value
+                with self.assertRaises(clean.GateError):
+                    clean.load_plan(self.write(modified))
+
+    def test_rejects_duplicate_json_keys(self):
+        path = self.root / 'duplicate.json'
+        path.write_text('{"schema":"disk-cleanup-plan/v1","schema":"other"}', encoding='utf-8')
+        with self.assertRaisesRegex(clean.GateError, 'duplicate JSON key'):
+            clean.load_plan(path)
+
+    def test_rejects_non_string_action_and_risk(self):
+        for key in ('action', 'risk'):
+            target = self.factory.target(self.victim, **{key: []})
+            self.assert_gate(self.factory.plan([target]), key + ' must be')
 
     def test_rejects_empty_targets(self):
         plan = self.factory.plan([])
@@ -343,6 +366,16 @@ class RunTests(unittest.TestCase):
         self.assertEqual(report['summary']['dry_run'], 1)
         self.assertEqual(report['summary']['trashed'], 0)
         self.assertTrue(self.cache.exists())
+
+    def test_plan_digest_hashes_the_exact_bytes_validated(self):
+        plan = self.factory.plan([self.factory.target(self.cache)])
+        raw = json.dumps(plan).encode('utf-8')
+        args = clean.argparse.Namespace(plan=str(self.root / 'plan.json'), path=None,
+                                        confirm_path=None, risk='caution', reason=None, go=False)
+        with patch.object(Path, 'read_bytes', side_effect=[raw, b'different']) as read:
+            report = clean.run(args)
+        self.assertEqual(read.call_count, 1)
+        self.assertEqual(report['plan_digest'], hashlib.sha256(raw).hexdigest())
 
     def test_preview_shows_nested_git_and_directory_limit(self):
         marker = self.cache / 'project' / '.git'

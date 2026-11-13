@@ -77,15 +77,29 @@ def die(code, message):
 
 # --------------------------------------------------------------------------- gate
 
-def load_plan(path):
-    """Read and validate the plan. Raises GateError on any violation."""
+def _unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise GateError(f'duplicate JSON key: {key!r}')
+        result[key] = value
+    return result
+
+
+def _bad_json_constant(value):
+    raise GateError(f'invalid JSON constant: {value}')
+
+
+def load_plan_with_digest(path):
+    """Validate and hash exactly the same bytes, without reopening the plan."""
     try:
-        raw = Path(path).read_text(encoding='utf-8')
+        raw = Path(path).read_bytes()
     except OSError as exc:
         raise GateError(f'cannot read plan: {exc}')
     try:
-        plan = json.loads(raw)
-    except json.JSONDecodeError as exc:
+        plan = json.loads(raw.decode('utf-8'), object_pairs_hook=_unique_object,
+                          parse_constant=_bad_json_constant)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise GateError(f'plan is not valid JSON: {exc}')
     if not isinstance(plan, dict):
         raise GateError('plan must be a JSON object')
@@ -101,11 +115,13 @@ def load_plan(path):
     for item in scope:
         if not isinstance(item, str) or not _has_drive(item):
             raise GateError(f'scope entry is not an absolute drive path: {item!r}')
-    excluded = auth.get('excluded') or []
-    if not isinstance(excluded, list) or not all(isinstance(x, str) for x in excluded):
-        raise GateError('authorization.excluded must be an array of strings')
-    if auth.get('permanent_delete'):
+    excluded = auth.get('excluded', [])
+    if not isinstance(excluded, list) or not all(isinstance(x, str) and _has_drive(x) for x in excluded):
+        raise GateError('authorization.excluded must be an array of absolute drive paths')
+    if auth.get('permanent_delete', False) is not False:
         raise GateError('this executor never performs permanent deletion')
+    if 'git_acknowledged' in auth and type(auth['git_acknowledged']) is not bool:
+        raise GateError('authorization.git_acknowledged must be boolean')
 
     targets = plan.get('targets')
     if not isinstance(targets, list) or not targets:
@@ -121,10 +137,10 @@ def load_plan(path):
         if not isinstance(path_value, str) or not _has_drive(path_value):
             raise GateError(f'{where}.path must be an absolute drive path')
         action = target.get('action')
-        if action not in ACTIONS:
+        if not isinstance(action, str) or action not in ACTIONS:
             raise GateError(f'{where}.action must be one of {sorted(ACTIONS)}')
         risk = target.get('risk')
-        if risk not in RISKS:
+        if not isinstance(risk, str) or risk not in RISKS:
             raise GateError(f'{where}.risk must be one of {sorted(RISKS)}')
         reason = target.get('reason')
         if not isinstance(reason, str) or not reason.strip():
@@ -167,11 +183,15 @@ def load_plan(path):
                         f'{where} records Git risk {verdict!r} but risk is "safe" and '
                         'authorization.git_acknowledged is not true')
 
-    return plan
+    return plan, hashlib.sha256(raw).hexdigest()
+
+
+def load_plan(path):
+    return load_plan_with_digest(path)[0]
 
 
 def _has_drive(value):
-    return bool(re.match(r'^[a-zA-Z]:[\\/]', value)) and len(value) >= 3
+    return '\x00' not in value and bool(re.match(r'^[a-zA-Z]:[\\/]', value)) and len(value) >= 3
 
 
 # ----------------------------------------------------------------------- preflight
@@ -298,8 +318,7 @@ def run(args):
     before, after = {}, {}
 
     if args.plan:
-        plan = load_plan(args.plan)
-        digest = hashlib.sha256(Path(args.plan).read_bytes()).hexdigest()[:16]
+        plan, digest = load_plan_with_digest(args.plan)
         targets = plan['targets']
     else:
         # Single-path mode: double entry proves the operator knows the exact target.
