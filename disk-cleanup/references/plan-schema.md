@@ -42,6 +42,8 @@
 
 `scan.py --format json` 返回的 `largest_files`、`largest_directories` 每项含扫描时取得的 `fingerprint`，可直接复制到对应路径的 `evidence.fingerprint`。目录指纹记录的是目录自身在遍历开始时的状态，不代表递归内容快照，也不保证聚合大小与该指纹同时成立。扫描不是原子快照，创建计划时重新取值不能声称是扫描时证据。
 
+Windows 可用 `python scripts/inspect_target.py '<绝对路径>' [--tree]` 对具体候选采集新的证据包。`complete: true` 时复制整个 `evidence`；失败时它为 null，错误保留在报告中。采集期间保持父目录链句柄，并在前后比较目标指纹与文件 ID；它仍不能排除保留元数据的修改、目标在检查间隙替换或目录内部并发变化。`evidence.collected_at_unix` 只记录本次采集开始时间，不参与授权门禁，不能伪称早先扫描证据。目录不输出 `size_bytes`，因为目录自身元数据长度不是递归内容大小。Git 标记另列于 `git_discovery`，不会自动填入审计或授权。
+
 Windows 下可运行 `python scripts/windows_identity.py '<绝对路径>'`，将完整 JSON 放入对应项的 `evidence.windows_file_id`。预览通过句柄重查卷序列号与 128 位文件 ID；读取失败或不同会跳过目标。此证据仅识别当时打开的对象，句柄返回前已关闭，不能锁定路径，也不能排除父目录替换、标识复用或并发修改；不验证文件内容、授权或可恢复性。文件系统不提供身份时不降级为已匹配。
 
 运行 `python scripts/windows_parents.py '<目标绝对路径>'` 可采集从卷根到直接父目录的身份链；将完整输出放入对应目标的 `evidence.windows_parent_chain`。计划门禁要求路径绑定且链条完整、有序、类型正确。预览会重新持有整条链的句柄并比较每级卷序列号和文件 ID；读取失败或不一致会跳过。匹配时报告 `windows_parent_chain_comparison: matched_at_inspection`。检查结束后句柄已释放，此结果不锁定后续路径，不证明内容或授权，也不能代替目标本身的身份证据。
