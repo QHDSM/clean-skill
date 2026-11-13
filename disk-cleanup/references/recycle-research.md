@@ -4,6 +4,8 @@
 
 `scripts/recycle_experimental.py` 是隔离原型，没有 CLI，也没有接入 `clean.py`。模拟测试覆盖接口调用顺序、执行失败与中止查询；即使 Shell 返回成功，原型也仅返回 `UNKNOWN`，不声称可恢复。该原型未完成实机验证，不应用于用户文件。
 
+Windows 实机测试已覆盖 COM 初始化、接口创建、设置标志、创建临时测试文件的 Shell 项并排队操作；不调用 `PerformOperations`，退出后测试文件内容保持不变。还检查了不存在的测试路径在执行前失败、接口释放可重复调用。这些测试不验证实际回收、取消后的状态或文件可恢复性。
+
 - [Microsoft IFileOperation 标志文档](https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nf-shobjidl_core-ifileoperation-setoperationflags) 描述 `FOFX_RECYCLEONDELETE` 在 Windows 8 引入，用于将删除项送往回收站；`FOF_ALLOWUNDO` 仅在可能时保留撤销信息。文档还描述了 `FOFX_EARLYFAILURE` 与 `FOF_NOERRORUI` 的组合，但本项目尚未验证不可回收位置、容量不足和系统策略等条件。
 - [Tuzfucius/disk-cleanup-skills 的回收后端](https://github.com/Tuzfucius/disk-cleanup-skills/blob/main/src/disk_cleanup/cleaner/recycle.py) 使用 `IFileOperation`、`FOFX_RECYCLEONDELETE` 和 `FOFX_EARLYFAILURE`，并检查中止状态。[执行器](https://github.com/Tuzfucius/disk-cleanup-skills/blob/main/src/disk_cleanup/cleaner/executor.py) 在调用前隔离并重验对象。可借鉴隔离、验证和结果分级，但其[可选实机测试](https://github.com/Tuzfucius/disk-cleanup-skills/blob/main/tests/test_windows_recycle_integration.py)只断言原路径消失，不能单独证明文件可恢复或失败时没有永久删除。
 - [Microsoft 中止状态文档](https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nf-shobjidl_core-ifileoperation-getanyoperationsaborted) 要求无论 `PerformOperations` 返回成功或失败，都检查中止状态；返回成功也可能表示操作已被取消。

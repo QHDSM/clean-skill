@@ -1,6 +1,8 @@
-"""Simulated Shell tests only; never invoke the native adapter."""
+"""Simulated behavior plus Windows COM preparation; never perform deletion."""
 from pathlib import Path
+import os
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
@@ -61,6 +63,31 @@ class ExperimentalRecycleTests(unittest.TestCase):
                 fake = FakeAdapter(fail=stage)
                 self.assertEqual(recycle.run_experiment('fixture', fake)['status'], 'UNKNOWN')
                 self.assertEqual(fake.calls[-1], 'close')
+
+
+@unittest.skipUnless(os.name == 'nt', 'Windows Shell COM test')
+class NativePreparationTests(unittest.TestCase):
+    def test_queue_without_perform_preserves_fixture(self):
+        with tempfile.TemporaryDirectory(prefix='disk-cleanup-com-') as temp:
+            fixture = Path(temp) / 'fixture.txt'
+            fixture.write_bytes(b'owned fixture')
+            adapter = recycle.NativeAdapter()
+            try:
+                adapter.initialize()
+                adapter.create_operation()
+                adapter.set_flags(recycle.FLAGS)
+                adapter.create_item(fixture)
+                adapter.queue_delete()
+            finally:
+                adapter.close()
+                adapter.close()  # Releasing an already closed adapter must be safe.
+            self.assertEqual(fixture.read_bytes(), b'owned fixture')
+
+    def test_missing_fixture_fails_before_perform(self):
+        with tempfile.TemporaryDirectory(prefix='disk-cleanup-com-') as temp:
+            adapter = recycle.NativeAdapter()
+            result = recycle.run_experiment(Path(temp) / 'missing.txt', adapter)
+            self.assertEqual(result['status'], 'FAILED_BEFORE_PERFORM')
 
 
 if __name__ == '__main__':

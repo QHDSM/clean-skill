@@ -100,6 +100,8 @@ class NativeAdapter:
         self.ole.CoCreateInstance.restype = ctypes.c_long
         _check(self.ole.CoCreateInstance(ctypes.byref(clsid), None, 1, ctypes.byref(iid),
                                          ctypes.byref(self.operation)), 'CoCreateInstance')
+        if not self.operation:
+            raise BackendError('CoCreateInstance returned an empty interface')
 
     def set_flags(self, flags):
         _check(self._method(self.operation, 5, ctypes.c_long, wintypes.DWORD)(self.operation, flags),
@@ -112,6 +114,8 @@ class NativeAdapter:
         self.shell.SHCreateItemFromParsingName.restype = ctypes.c_long
         _check(self.shell.SHCreateItemFromParsingName(str(path), None, ctypes.byref(iid),
                                                       ctypes.byref(self.item)), 'SHCreateItemFromParsingName')
+        if not self.item:
+            raise BackendError('SHCreateItemFromParsingName returned an empty interface')
 
     def queue_delete(self):
         _check(self._method(self.operation, 18, ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p)
@@ -130,5 +134,7 @@ class NativeAdapter:
         for pointer in (self.item, self.operation):
             if pointer:
                 self._method(pointer, 2, wintypes.ULONG)(pointer)
+                pointer.value = None
         if self.initialized:
             self.ole.CoUninitialize()
+            self.initialized = False
