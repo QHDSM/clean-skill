@@ -3,6 +3,7 @@ from pathlib import Path
 import os
 import sys
 import tempfile
+import ctypes
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
@@ -71,7 +72,7 @@ class NativePreparationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='disk-cleanup-com-') as temp:
             fixture = Path(temp) / 'fixture.txt'
             fixture.write_bytes(b'owned fixture')
-            adapter = recycle.NativeAdapter()
+            adapter = recycle.NativeAdapter(observe=True)
             try:
                 adapter.initialize()
                 adapter.create_operation()
@@ -88,6 +89,22 @@ class NativePreparationTests(unittest.TestCase):
             adapter = recycle.NativeAdapter()
             result = recycle.run_experiment(Path(temp) / 'missing.txt', adapter)
             self.assertEqual(result['status'], 'FAILED_BEFORE_PERFORM')
+
+    def test_observer_records_delete_evidence_and_rejects_nonrecycle_request(self):
+        from recycle_sink_experimental import DeleteObserver, E_ABORT
+        observer = DeleteObserver()
+        pre = recycle.NativeAdapter._method(observer.pointer, 11, ctypes.c_long,
+                                           ctypes.c_uint32, ctypes.c_void_p)
+        self.assertEqual(pre(observer.pointer, 0, None), E_ABORT)
+        self.assertEqual(pre(observer.pointer, 0x80, None), 0)
+        post = recycle.NativeAdapter._method(observer.pointer, 12, ctypes.c_long,
+                    ctypes.c_uint32, ctypes.c_void_p, ctypes.c_long, ctypes.c_void_p)
+        self.assertEqual(post(observer.pointer, 0x80, None, 2555912, 1), 0)
+        self.assertTrue(observer.events[-1]['recycle_item_provided'])
+        self.assertFalse(recycle._failed(observer.events[-1]['hresult']))
+        post(observer.pointer, 0x80, None, -1, None)
+        self.assertFalse(observer.events[-1]['recycle_item_provided'])
+        self.assertEqual(observer.events[-1]['hresult'], -1)
 
 
 if __name__ == '__main__':

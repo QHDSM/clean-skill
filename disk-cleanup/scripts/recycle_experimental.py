@@ -53,6 +53,9 @@ def run_experiment(path, adapter):
     except Exception as exc:
         result = {'status': 'UNKNOWN' if attempted else 'FAILED_BEFORE_PERFORM', 'detail': str(exc)}
     finally:
+        observer = getattr(adapter, 'observer', None)
+        if observer is not None:
+            result['delete_callbacks'] = list(observer.events)
         try:
             adapter.close()
         except Exception as exc:
@@ -63,11 +66,13 @@ def run_experiment(path, adapter):
 
 class NativeAdapter:
     """Thin COM adapter for an isolated experiment, not a cleanup safety gate."""
-    def __init__(self):
+    def __init__(self, *, observe=False):
         self.operation = ctypes.c_void_p()
         self.item = ctypes.c_void_p()
         self.initialized = False
         self.ole = self.shell = None
+        self.observe = observe
+        self.observer = None
 
     def initialize(self):
         if os.name != 'nt' or sys.getwindowsversion() < (6, 2):
@@ -118,8 +123,11 @@ class NativeAdapter:
             raise BackendError('SHCreateItemFromParsingName returned an empty interface')
 
     def queue_delete(self):
+        if self.observe:
+            from recycle_sink_experimental import DeleteObserver
+            self.observer = DeleteObserver()
         _check(self._method(self.operation, 18, ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p)
-               (self.operation, self.item, None), 'DeleteItem')
+               (self.operation, self.item, self.observer.pointer if self.observer else None), 'DeleteItem')
 
     def perform(self):
         return self._method(self.operation, 21, ctypes.c_long)(self.operation)
