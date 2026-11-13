@@ -8,11 +8,28 @@
 
 1. 查看实际固定磁盘、用户目标和排除项。
 2. 展示本次授权范围、清理类型、删除方式和权限要求。
-3. 扫描、分类和自主处理授权内可验证的项目，无须逐文件重复确认。
-4. 跳过用途不明、正在使用、权限不足或范围变化的项目。
-5. 报告实际处理结果及每盘可用空间变化。
+3. 只读扫描并分类，把执行意图写成 `plan.json`（每项带路径、理由、风险与指纹）。
+4. 由 `clean.py` 校验计划后执行：门禁不过整份拒绝，执行只走回收站，删除前逐项重验指纹。
+5. 报告实际处理结果、拒绝与跳过原因，以及每盘可用空间变化。
 
 覆盖系统临时文件、应用缓存、开发工具、容器，以及个人文件、备份、云同步和重复文件分析。后几类默认保留；缓存也必须确认用途、位置、可重建性及使用状态。全机扫描默认选择可访问本地固定磁盘；移动、网络和远程 Docker 环境不自动纳入。
+
+## 两个脚本的分工
+
+| 脚本 | 能力 | 是否删除 |
+|---|---|---|
+| `scripts/scan.py` | 只读扫描、分类、重复文件检测 | **无任何删除能力** |
+| `scripts/clean.py` | 校验 `plan.json` 并移动至回收站 | 只走回收站，失败即拒绝 |
+| `scripts/git_audit.py` | 只读 Git 风险审计 | 无 |
+
+`clean.py` 的安全边界（在代码里，不在文档里）：
+
+- 计划是唯一输入，执行器**不重放扫描结果**，因此不会删掉计划外的东西。
+- 门禁校验 schema、指纹完整性、路径越权与排除项；任一项不过则**零执行**。
+- 执行前用 `(st_dev, st_ino, st_size, st_mtime_ns, st_ctime_ns)` 逐项重验，扫描后变化的对象跳过。
+- 回收站失败即拒绝该项，**不降级为永久删除**。
+- 受保护树（`C:\Windows`、`C:\$Recycle.Bin`、`C:\Recovery` 等）整棵拒绝；`C:\ProgramData` 等只拒绝目录本身，其下被点名的缓存子目录可处理。
+- 计划格式与全部规则见 [`disk-cleanup/references/plan-schema.md`](disk-cleanup/references/plan-schema.md)。
 
 ## 安装到 Codex
 
@@ -45,6 +62,26 @@ Copy-Item -LiteralPath '.\disk-cleanup' -Destination $skillTarget -Recurse
 ```
 
 授权只对当前任务及明确范围有效。系统提权仍通过正常机制；不会绕过 UAC 或宿主权限。永久删除、关闭应用、重启等必须在授权中有明确选择。用户只要求分析时保持只读。
+
+## 执行清理（`clean.py`）
+
+`clean.py` 只接受 agent 产出的 `plan.json`，**默认 dry-run**：
+
+```powershell
+python disk-cleanup/scripts/clean.py --plan plan.json          # 只打印将要做什么
+python disk-cleanup/scripts/clean.py --plan plan.json --go     # 移入回收站
+python disk-cleanup/scripts/clean.py --plan plan.json --go --json
+```
+
+单路径模式需要两次输入同一对象（验证「知道删什么」，不是「会打字」）：
+
+```powershell
+python disk-cleanup/scripts/clean.py --path 'D:\tmp\x' --confirm-path 'D:\tmp\x' --go
+```
+
+退出码：`0` 全部按要求处理；`2` 计划被门禁拒绝且**零执行**；`3` 计划通过但有目标被拒绝或失败。
+
+每次执行向 `~/.disk-cleanup/audit-YYYYMMDD.jsonl` 追加一条记录，含路径、结果、大小与指纹。日志只存本地，不要提交到仓库。
 
 ## 独立使用只读扫描工具
 
@@ -89,16 +126,24 @@ python disk-cleanup/scripts/scan.py 'D:\Projects' --format json --output 'report
 python -m unittest discover -s disk-cleanup/tests -v
 ```
 
-测试使用临时目录，不清理真实电脑。覆盖大小统计、范围/深度/排除、只读性质、JSON、报告防覆盖、重复识别、文件变化、访问失败、中断、硬链接和 Windows 联接点；符号链接创建权限不足时该测试会跳过。模拟权限/中断用于确定性验证，不能替代每个 Windows 版本的实机测试。
+测试使用临时目录，不清理真实电脑。共 60 项：
+
+- `test_scan.py`（14 项）：大小统计、范围/深度/排除、只读性质、JSON、报告防覆盖、重复识别、文件变化、访问失败、中断、硬链接、Windows 联接点。
+- `test_clean.py`（46 项）：计划门禁全部规则（schema、指纹、路径、action/risk、scope、排除项、Git 闸门）、preflight 保留路径、指纹重验（含 `st_ino` 为 0 的降级路径、读取后不误判为变化）、dry-run 不落地、单路径双输入确认。
+
+回收站的真实行为无法在 CI 验证，需在 Windows 实机确认；测试只覆盖到调用前的全部判断。
 
 [Agent 行为场景](disk-cleanup/tests/behavior-scenarios.md) 是独立演练清单，不代表所有宿主 Agent 已完成行为验收。
 
 ## 目录与维护
 
-- [核心技能](disk-cleanup/SKILL.md)：触发条件、一次授权、清理流程和结果报告。
+- [核心技能](disk-cleanup/SKILL.md)：触发条件、一次授权、计划格式、执行边界与结果报告。
+- [计划格式](disk-cleanup/references/plan-schema.md)：`plan.json` 全部字段、门禁规则、退出码与路径保护规则。
 - `disk-cleanup/references/`：按场景加载的 Windows、分类和开发工具指南，附官方资料。
-- `disk-cleanup/scripts/scan.py`：只读扫描；不附自动删除脚本。
-- `disk-cleanup/tests/`：扫描测试和行为演练场景。
+- `disk-cleanup/scripts/scan.py`：只读扫描，无删除能力。
+- `disk-cleanup/scripts/clean.py`：计划校验与回收站执行，默认 dry-run。
+- `disk-cleanup/scripts/git_audit.py`：只读 Git 风险审计。
+- `disk-cleanup/tests/`：扫描与执行器测试、行为演练场景。
 
 工具版本和系统入口变化时，先检查本机帮助及官方资料，再更新对应参考。贡献修改时运行相关测试，并核实是否改变授权范围或数据保留规则。
 

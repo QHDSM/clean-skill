@@ -77,6 +77,18 @@ def fingerprint(st):
     return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
 
 
+def content_identity(st):
+    """Fields that stay comparable across lstat and fstat and survive a read.
+
+    st_ino/st_dev can differ between a path-based stat and a handle-based stat on
+    Windows, and st_ctime (NTFS ChangeTime) is bumped when reading a file updates
+    its last-access time. Neither is evidence that the content changed, so a hash
+    guard must not use them. Size plus mtime are the fields that actually move
+    when content changes.
+    """
+    return (st.st_size, st.st_mtime_ns)
+
+
 def hash_file(path, expected):
     check_path(path)
     before = os.lstat(path)
@@ -85,12 +97,13 @@ def hash_file(path, expected):
     flags = os.O_RDONLY | getattr(os, 'O_BINARY', 0) | getattr(os, 'O_NOFOLLOW', 0)
     fd = os.open(path, flags)
     with os.fdopen(fd, 'rb') as stream:
-        if fingerprint(os.fstat(stream.fileno())) != expected:
+        opened = os.fstat(stream.fileno())
+        if content_identity(opened) != content_identity(before):
             raise OSError('file changed while opening')
         digest = hashlib.sha256()
         for chunk in iter(lambda: stream.read(1024 * 1024), b''):
             digest.update(chunk)
-        if fingerprint(os.fstat(stream.fileno())) != expected:
+        if content_identity(os.fstat(stream.fileno())) != content_identity(before):
             raise OSError('file changed while hashing')
     if fingerprint(os.lstat(path)) != expected:
         raise OSError('file changed after hashing')
