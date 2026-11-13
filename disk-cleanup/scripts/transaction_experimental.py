@@ -1,6 +1,6 @@
 """Fixture-only staging/recovery experiment; not connected to clean.py.
 
-No authorization, parent-handle binding or automatic crash recovery is
+No authorization, historical parent identity binding or automatic crash recovery is
 implemented. Never call this on user data or treat results as a cleanup success.
 """
 import os
@@ -21,7 +21,11 @@ def run_fixture(source, expected, backend, *, journal_path=None):
     except OSError as exc:
         return {'status': 'JOURNAL_FAILED', 'source': str(source), 'detail': str(exc)}
     try:
-        result = _run_fixture(source, expected, backend, journal, token)
+        try:
+            with stage_experimental.PinnedParents(source.parent):
+                result = _run_fixture(source, expected, backend, journal, token)
+        except (OSError, ValueError) as exc:
+            result = {'status': 'PARENT_PIN_FAILED', 'source': str(source), 'detail': str(exc)}
         return {**result, 'journal': str(journal_path)}
     finally:
         journal.close()

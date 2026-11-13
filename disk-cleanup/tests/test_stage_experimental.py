@@ -57,6 +57,26 @@ class StageTests(unittest.TestCase):
         staged = stage_experimental.stage_fixture(source, expected, 'staged')
         self.assertEqual((staged / 'child').read_bytes(), b'data')
 
+    def test_pinned_ancestors_cannot_be_renamed_until_release(self):
+        parent = self.root / 'parent'
+        child = parent / 'child'
+        child.mkdir(parents=True)
+        with stage_experimental.PinnedParents(child):
+            with self.assertRaises(OSError):
+                parent.rename(self.root / 'moved-parent')
+            with self.assertRaises(OSError):
+                child.rename(parent / 'moved-child')
+        child.rename(parent / 'moved-child')
+        parent.rename(self.root / 'moved-parent')
+
+    def test_preparation_failure_releases_ancestors(self):
+        parent = self.root / 'parent'
+        parent.mkdir()
+        with self.assertRaises(OSError):
+            with stage_experimental.PinnedParents(parent / 'missing'):
+                self.fail('missing parent accepted')
+        parent.rename(self.root / 'moved-parent')
+
 
 if __name__ == '__main__':
     unittest.main()

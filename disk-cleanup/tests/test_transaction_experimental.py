@@ -92,6 +92,19 @@ transaction_experimental.run_fixture(sys.argv[2],windows_identity.capture(sys.ar
         journal.write_bytes(b'{"sequence":0,"event":"INTENT"')
         self.assertFalse(journal_experimental.inspect(journal)['readable'])
 
+    def test_parents_remain_pinned_during_backend_and_are_released_after(self):
+        parent = self.root / 'parent'
+        parent.mkdir()
+        source = parent / 'fixture'
+        source.write_bytes(b'owned')
+        def attempt_parent_rename(path):
+            with self.assertRaises(OSError):
+                parent.rename(self.root / 'moved')
+        result = transaction_experimental.run_fixture(source, windows_identity.capture(source), attempt_parent_rename)
+        self.assertEqual(result['status'], 'RESTORED')
+        parent.rename(self.root / 'moved')
+        self.assertEqual((self.root / 'moved' / 'fixture').read_bytes(), b'owned')
+
 
 if __name__ == '__main__':
     unittest.main()
