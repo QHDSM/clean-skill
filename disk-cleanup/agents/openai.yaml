@@ -1,0 +1,4 @@
+interface:
+  display_name: "磁盘清理"
+  short_description: "分析 Windows 全机磁盘占用，在一次明确授权内自主清理并保留个人数据"
+  default_prompt: "使用 $disk-cleanup 分析本地磁盘，展示一次授权清理策略后执行授权范围内的清理。"
