@@ -2,12 +2,14 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import subprocess
 import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 import transaction_experimental
 import windows_identity
+import journal_experimental
 
 
 @unittest.skipUnless(os.name == 'nt', 'Windows handle staging test')
@@ -60,6 +62,35 @@ class TransactionTests(unittest.TestCase):
             result = transaction_experimental.run_fixture(self.source, self.identity, lambda path: None)
         self.assertEqual(result['status'], 'RECOVERY_UNKNOWN')
         self.assertEqual(self.source.read_bytes(), b'original fixture')
+
+    def test_journal_sync_failure_prevents_staging(self):
+        with patch.object(journal_experimental.os, 'fsync', side_effect=OSError('disk error')):
+            result = transaction_experimental.run_fixture(self.source, self.identity, lambda path: self.fail('backend ran'))
+        self.assertEqual(result['status'], 'JOURNAL_FAILED')
+        self.assertEqual(self.source.read_bytes(), b'original fixture')
+
+    def test_process_exit_leaves_inspectable_identity_and_paths(self):
+        journal = self.root / 'crash.jsonl'
+        code = '''import os,sys
+sys.path.insert(0, sys.argv[1])
+import transaction_experimental,windows_identity
+transaction_experimental.run_fixture(sys.argv[2],windows_identity.capture(sys.argv[2]),lambda path: os._exit(71),journal_path=sys.argv[3])
+'''
+        proc = subprocess.run([sys.executable, '-c', code,
+                               str(Path(__file__).resolve().parents[1] / 'scripts'),
+                               str(self.source), str(journal)], capture_output=True)
+        self.assertEqual(proc.returncode, 71, proc.stderr)
+        report = journal_experimental.inspect(journal)
+        self.assertTrue(report['readable'])
+        self.assertEqual(report['last_event'], 'BACKEND_INTENT')
+        self.assertTrue(report['observed']['staged']['identity_matches'])
+        self.assertFalse(report['recovery_performed'])
+        self.assertEqual(Path(report['intent']['staged']).read_bytes(), b'original fixture')
+
+    def test_torn_journal_is_incomplete(self):
+        journal = self.root / 'torn.jsonl'
+        journal.write_bytes(b'{"sequence":0,"event":"INTENT"')
+        self.assertFalse(journal_experimental.inspect(journal)['readable'])
 
 
 if __name__ == '__main__':
