@@ -36,6 +36,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import scan  # reuse check_path / unsafe / fingerprint; read-only helpers only
+import git_discovery
 
 SCHEMA = 'disk-cleanup-plan/v1'
 ACTIONS = {'trash', 'keep', 'report'}
@@ -343,6 +344,8 @@ def run(args):
 
         entry['size_bytes'] = target['evidence'].get('size_bytes')
         entry['fingerprint'] = target['evidence']['fingerprint']
+        entry['git_discovery'] = git_discovery.discover(path)
+        entry['directory_contents_verified'] = False if os.path.isdir(path) else None
 
         if not args.go:
             entry.update(result='dry_run', detail='preview only; execution disabled')
@@ -407,6 +410,14 @@ def render(report):
            summary['skipped'], summary['refused'], summary['failed']))
     for item in report['results']:
         lines.append('  %-10s %s' % (item['result'], item['path']))
+        discovery = item.get('git_discovery')
+        if discovery:
+            for marker in discovery['markers']:
+                lines.append('             Git marker: ' + marker)
+            if not discovery['complete']:
+                lines.append('             Git discovery incomplete: ' + '; '.join(discovery['issues']))
+        if item.get('directory_contents_verified') is False:
+            lines.append('             Directory contents not verified by fingerprint')
         if item.get('detail') and item['result'] != 'dry_run':
             lines.append('             ↳ %s' % item['detail'])
     if report['volumes']:

@@ -7,7 +7,7 @@ description: Analyze Windows disk usage and carry out scoped cleanup after one t
 
 帮助用户找出占用来源，在一次明确授权内自主完成清理，核实实际收益。Windows 优先；其他系统仅提供明确适用的分析，不套用 Windows 命令。
 
-**当前版本只支持扫描和计划预览。** `clean.py --go` 已停用：旧 Windows Shell 接口不能保证仅回收而不永久删除。不要用其他删除命令绕过这个限制。目录指纹不能证明子孙文件未变，Git 风险证据也不会自动发现；预览通过不代表目标安全或可执行。
+**当前版本只支持扫描和计划预览。** `clean.py --go` 已停用：旧 Windows Shell 接口不能保证仅回收而不永久删除。不要用其他删除命令绕过这个限制。目录指纹不能证明子孙文件未变；预览中的 Git 发现只是有上限的线索，不能证明不存在仓库或本地数据，也不能代替 Git 审计。
 
 ## 1. 确定范围
 
@@ -51,6 +51,8 @@ python scripts/git_audit.py '<仓库路径>' --format json
 ```
 
 它只调用 git 只读子命令，判定"是否存在仅存在于本地、远端未证明覆盖的数据"：未推送提交、未跟踪文件、暂存/修改/冲突、stash、ignored 项、无上游分支、linked worktree。输出 `verdict` 为 `SAFE_TO_CONSIDER` / `LOCAL_ONLY_DATA_PRESENT` / `LOCAL_MODIFICATIONS` / `UNVERIFIED`。非 `SAFE_TO_CONSIDER` 一律先向用户说明具体风险项并取得确认；`unknown` 非空表示证据不足，不能按安全处理。ignore 命中不等于可丢弃，已推送 HEAD 或旧时间戳也不等于可删除。
+
+计划预览会查找目标祖先及后代的 `.git` 标记；逐项查看 `git_discovery.markers`、`complete` 和 `issues`。发现标记时对其工作树运行 Git 审计；覆盖不完整、裸仓库或外部 Git 目录等情况仍可能遗漏，不得把无标记当作安全证明。
 
 读取 [Windows 指南](references/windows.md) 处理系统、权限和路径；遇到个人文件、浏览器、备份、云文件或重复项，读 [分类规则](references/cleanup-categories.md)；遇到开发工具或容器，读 [开发环境指南](references/development-tools.md)。
 

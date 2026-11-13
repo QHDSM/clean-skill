@@ -343,6 +343,15 @@ class RunTests(unittest.TestCase):
         self.assertEqual(report['summary']['trashed'], 0)
         self.assertTrue(self.cache.exists())
 
+    def test_preview_shows_nested_git_and_directory_limit(self):
+        marker = self.cache / 'project' / '.git'
+        marker.mkdir(parents=True)
+        report = self.run_plan(self.factory.plan([self.factory.target(self.cache)]))
+        entry = report['results'][0]
+        self.assertIn(str(marker), entry['git_discovery']['markers'])
+        self.assertFalse(entry['directory_contents_verified'])
+        self.assertIn('Git marker:', clean.render(report))
+
     def test_execution_is_disabled_before_any_action(self):
         with self.assertRaisesRegex(clean.GateError, 'execution disabled'):
             self.run_plan(self.factory.plan([self.factory.target(self.cache)]), go=True)
