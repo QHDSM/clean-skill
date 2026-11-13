@@ -1,5 +1,7 @@
-"""Opt-in live test of one self-created fixture; never touches other items."""
+"""Opt-in live tests of self-created fixtures; never touches other items."""
 import os
+import ctypes
+from ctypes import wintypes
 from pathlib import Path
 import sys
 import tempfile
@@ -14,16 +16,22 @@ import recycle_experimental
 @unittest.skipUnless(os.name == 'nt' and os.environ.get('DISK_CLEANUP_LIVE_RECYCLE_TEST') == '1',
                      'set DISK_CLEANUP_LIVE_RECYCLE_TEST=1 on Windows to run live recycle test')
 class LiveRecycleTest(unittest.TestCase):
-    def test_one_fixture_can_be_restored(self):
+    def roundtrip(self, directory):
         try:
             import win32com.client
         except ImportError:
             self.skipTest('pywin32 is required for the opt-in live test')
 
-        root = Path(tempfile.mkdtemp(prefix='disk-cleanup-owned-fixture-'))
-        target = root / ('fixture-' + uuid.uuid4().hex + '.txt')
+        parent = os.environ.get('DISK_CLEANUP_LIVE_TEST_PARENT') or None
+        root = Path(tempfile.mkdtemp(prefix='disk-cleanup-owned-fixture-', dir=parent))
+        target = root / ('fixture-' + uuid.uuid4().hex + ('' if directory else '.txt'))
         content = os.urandom(64)
-        target.write_bytes(content)
+        if directory:
+            (target / 'nested').mkdir(parents=True)
+            payload = target / 'nested' / 'payload.bin'
+        else:
+            payload = target
+        payload.write_bytes(content)
         folder = win32com.client.Dispatch('Shell.Application').NameSpace(10)
         self.assertIsNotNone(folder, f'No Recycle Bin; fixture retained at {root}')
         result = recycle_experimental.run_experiment(target, recycle_experimental.NativeAdapter())
@@ -46,11 +54,45 @@ class LiveRecycleTest(unittest.TestCase):
         self.assertFalse(target.exists(), f'Original still exists; refusing restore: {target}')
         verbs[0].DoIt()
         for _ in range(50):
-            if target.exists():
+            if payload.exists():
                 break
             time.sleep(0.2)
-        self.assertTrue(target.exists(), f'Fixture not restored; directory retained: {root}')
-        self.assertEqual(target.read_bytes(), content, f'Fixture content differs; retained at {target}')
+        self.assertTrue(payload.exists(), f'Fixture not restored; directory retained: {root}')
+        self.assertEqual(payload.read_bytes(), content, f'Fixture content differs; retained at {target}')
+        payload.unlink()
+        if directory:
+            (target / 'nested').rmdir()
+            target.rmdir()
+        root.rmdir()
+
+    def test_one_file_can_be_restored(self):
+        self.roundtrip(directory=False)
+
+    def test_nested_directory_can_be_restored(self):
+        self.roundtrip(directory=True)
+
+    def test_exclusively_locked_file_remains_present(self):
+        parent = os.environ.get('DISK_CLEANUP_LIVE_TEST_PARENT') or None
+        root = Path(tempfile.mkdtemp(prefix='disk-cleanup-owned-fixture-', dir=parent))
+        target = root / ('locked-' + uuid.uuid4().hex + '.txt')
+        content = os.urandom(64)
+        target.write_bytes(content)
+        kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+        kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                       ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD,
+                                       wintypes.HANDLE]
+        kernel.CreateFileW.restype = wintypes.HANDLE
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel.CloseHandle.restype = wintypes.BOOL
+        handle = kernel.CreateFileW(str(target), 0x80000000, 0, None, 3, 0x80, None)
+        self.assertNotEqual(handle, ctypes.c_void_p(-1).value, f'Cannot lock fixture; retained at {root}')
+        try:
+            result = recycle_experimental.run_experiment(target, recycle_experimental.NativeAdapter())
+        finally:
+            kernel.CloseHandle(handle)
+        self.assertIn(result['status'], {'UNKNOWN', 'FAILED_BEFORE_PERFORM'})
+        self.assertTrue(target.exists(), f'Locked fixture disappeared; directory retained: {root}')
+        self.assertEqual(target.read_bytes(), content, f'Locked fixture changed; retained at {target}')
         target.unlink()
         root.rmdir()
 
