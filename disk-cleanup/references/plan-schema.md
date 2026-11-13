@@ -74,6 +74,8 @@
 闸门规则：`risk` 为 `safe` 但 `verdict` 不是 `SAFE_TO_CONSIDER` 时，必须同时设置
 `authorization.git_acknowledged: true`，否则整份计划被拒绝。此检查仅在提供了 Git 证据时生效，不能自动识别仓库，也不能独立防止误删。
 
+当前 Git 审计不会 fetch，也不覆盖所有本地标签、reflog 和不可达提交，因此 `unknown` 始终非空、`all_content_synced` 不会为 true。分支领先数相加可能重复计数；失效上游、分离 HEAD 或读取失败均不能当作安全结论。
+
 `verdict` 取值：
 
 | verdict | 含义 | 建议 |

@@ -19,7 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
+import re
 import subprocess
 import sys
 
@@ -67,7 +67,7 @@ def porcelain_audit(repo: str) -> dict:
         if x == "!" and y == "!":
             ignored += 1
             continue
-        if x in "DU" or y in "DU":          # 冲突
+        if x + y in {"DD", "AU", "UD", "UA", "DU", "AA", "UU"}:
             conflicts += 1
             continue
         if x not in " ?":
@@ -98,19 +98,23 @@ def upstream_audit(repo: str) -> dict:
     if code != 0:
         return {"error": err.strip() or out.strip() or "for-each-ref failed", "branches": []}
 
-    branches, local_only, unpushed = [], [], 0
+    branches, local_only, unpushed, unknown = [], [], 0, []
     for line in out.splitlines():
         if "|" not in line:
             continue
         name, upstream, track = (line.split("|") + ["", ""])[:3]
         ahead = behind = 0
-        if track:
-            for part in track.split(","):
-                part = part.strip()
-                if part.startswith("ahead "):
-                    ahead = int(part.split()[1])
-                elif part.startswith("behind "):
-                    behind = int(part.split()[1])
+        if track == '[gone]':
+            unknown.append("branch:%s upstream is gone" % name)
+            local_only.append("branch:%s (upstream gone)" % name)
+        elif track:
+            if not re.fullmatch(r'\[(?:ahead \d+|behind \d+)(?:, (?:ahead \d+|behind \d+))?\]', track):
+                unknown.append("branch:%s unrecognized tracking state %r" % (name, track))
+            else:
+                ahead_match = re.search(r'\bahead (\d+)', track)
+                behind_match = re.search(r'\bbehind (\d+)', track)
+                ahead = int(ahead_match.group(1)) if ahead_match else 0
+                behind = int(behind_match.group(1)) if behind_match else 0
         entry = {"branch": name, "upstream": upstream or None,
                  "ahead": ahead, "behind": behind}
         branches.append(entry)
@@ -120,7 +124,7 @@ def upstream_audit(repo: str) -> dict:
             unpushed += ahead
             local_only.append("branch:%s (ahead %d, not pushed)" % (name, ahead))
     return {"error": None, "branches": branches, "local_only_refs": local_only,
-            "unpushed_commit_count": unpushed}
+            "unpushed_commit_count": unpushed, "unknown": unknown}
 
 
 def remote_state(repo: str) -> dict:
@@ -162,6 +166,17 @@ def audit(path: str) -> dict:
         unknown.append("stash status unknown: %s" % stash_err)
     if up.get("error"):
         unknown.append("branch tracking unknown: %s" % up["error"])
+    unknown.extend(up.get("unknown", []))
+    if rem.get("error"):
+        unknown.append("remote configuration unknown: %s" % rem["error"])
+    if wt.get("error"):
+        unknown.append("linked worktree status unknown: %s" % wt["error"])
+    code, _, err = run_git(repo, ["symbolic-ref", "-q", "HEAD"])
+    if code == 1:
+        unknown.append("detached HEAD: commit coverage is not established")
+    elif code != 0:
+        unknown.append("HEAD state unknown: %s" % (err.strip() or "symbolic-ref failed"))
+    unknown.append("local tags, reflogs and unreachable commits are not audited")
     if wt.get("linked_worktrees"):
         risks.append("%d linked worktree(s); their private state is not covered by this report"
                      % wt["linked_worktrees"])
@@ -180,9 +195,9 @@ def audit(path: str) -> dict:
         risks.append("ignored entries are LOCAL-ONLY too; ignore does not mean disposable")
     if stashes:
         risks.append("local stashes are not protected by ordinary push")
-    if not rem.get("remotes"):
+    if not rem.get("remotes") and not rem.get("error"):
         risks.append("no remote configured")
-    else:
+    elif rem.get("remotes"):
         unknown.append(rem["note"])
 
     local_only = list(up.get("local_only_refs", []))

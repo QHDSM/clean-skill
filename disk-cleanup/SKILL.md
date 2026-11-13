@@ -52,6 +52,8 @@ python scripts/git_audit.py '<仓库路径>' --format json
 
 它只调用 git 只读子命令，判定"是否存在仅存在于本地、远端未证明覆盖的数据"：未推送提交、未跟踪文件、暂存/修改/冲突、stash、ignored 项、无上游分支、linked worktree。输出 `verdict` 为 `SAFE_TO_CONSIDER` / `LOCAL_ONLY_DATA_PRESENT` / `LOCAL_MODIFICATIONS` / `UNVERIFIED`。非 `SAFE_TO_CONSIDER` 一律先向用户说明具体风险项并取得确认；`unknown` 非空表示证据不足，不能按安全处理。ignore 命中不等于可丢弃，已推送 HEAD 或旧时间戳也不等于可删除。
 
+审计使用本地缓存的远端引用，不执行 fetch；本地标签、reflog 和不可达提交尚未完整审计，故当前结果总会保留 `unknown`，不能把无风险项或退出码当作远端已备份的证明。领先数量是各分支领先数的总和，不一定是去重后的提交数。
+
 计划预览会查找目标祖先及后代的 `.git` 标记；逐项查看 `git_discovery.markers`、`complete` 和 `issues`。发现标记时对其工作树运行 Git 审计；覆盖不完整、裸仓库或外部 Git 目录等情况仍可能遗漏，不得把无标记当作安全证明。
 
 读取 [Windows 指南](references/windows.md) 处理系统、权限和路径；遇到个人文件、浏览器、备份、云文件或重复项，读 [分类规则](references/cleanup-categories.md)；遇到开发工具或容器，读 [开发环境指南](references/development-tools.md)。
