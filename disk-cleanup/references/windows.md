@@ -1,5 +1,7 @@
 # Windows：存储、权限和执行
 
+扫描器可用 `--allocation` 查询 [FILE_STANDARD_INFO](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_standard_info) 的文件分配量，结合句柄级文件 ID 去重。结果是遍历期间文件系统报告的文件分配量，不是整个卷的物理用量或可回收空间；目录、元数据和共享存储等不能据此精确归因。查看 `allocation_observation.complete`，不完整时仅报告观察部分，`allocated_bytes` 和可释放字节仍为未知。
+
 ## 先检查
 
 使用扫描器 `--list-drives` 获取固定磁盘。盘符不代表物理磁盘；网络映射盘和可移动盘不默认加入。读取用户排除项，检查当前权限；不要为只读统计自动提升权限。

@@ -112,7 +112,9 @@ def hash_file(path, expected):
 
 
 class Scanner:
-    def __init__(self, roots, *, depth=None, top=20, min_size=0, excludes=(), duplicates=False, progress=True):
+    def __init__(self, roots, *, depth=None, top=20, min_size=0, excludes=(), duplicates=False, progress=True, allocation=False):
+        if allocation and os.name != 'nt':
+            raise ValueError('--allocation is Windows-only')
         self.roots = [str(check_path(p)) for p in roots]
         for i, root in enumerate(self.roots):
             if not Path(root).is_dir():
@@ -129,6 +131,22 @@ class Scanner:
         self.candidates = collections.defaultdict(list)
         self.limited = self.interrupted = False
         self.last_progress = 0
+        self.allocation = allocation
+        self.allocation_total = self.allocation_paths = self.allocation_links = 0
+        self.allocation_ids = set()
+
+    def observe_allocation(self, path, info):
+        import windows_identity
+        observed = windows_identity.capture(path, allocation=True)
+        if observed['end_of_file'] != info.st_size or fingerprint(os.lstat(path))[:4] != fingerprint(info)[:4]:
+            raise OSError('file changed while querying allocation')
+        self.allocation_paths += 1
+        identity = (observed['volume_serial'], observed['file_id'])
+        if identity in self.allocation_ids:
+            self.allocation_links += 1
+        else:
+            self.allocation_ids.add(identity)
+            self.allocation_total += observed['allocation_bytes']
 
     def note(self, path, reason, error=False):
         bucket = self.errors if error else self.skipped
@@ -218,6 +236,8 @@ class Scanner:
                         self.types[ext][0] += 1
                         self.types[ext][1] += amount
                         self.keep(self.big_files, amount, target, fingerprint(info))
+                        if self.allocation:
+                            self.observe_allocation(target, info)
                         if self.duplicates and amount >= self.min_size and amount > 0:
                             self.candidates[amount].append((target, fingerprint(info)))
                     else:
@@ -277,9 +297,14 @@ class Scanner:
                     started_at_unix=started, elapsed_seconds=round(time.time()-started, 3),
                     complete=not(self.interrupted or self.error_count or self.skip_count),
                     coverage_limited=self.limited, interrupted=self.interrupted,
-                    scope=dict(depth=self.depth, top=self.top, min_size=self.min_size, duplicates=self.duplicates),
+                    scope=dict(depth=self.depth, top=self.top, min_size=self.min_size, duplicates=self.duplicates, allocation=self.allocation),
                     files=self.files, directories=self.dirs, logical_bytes=self.total,
                     allocated_bytes=None, volumes=volumes, largest_files=rows(self.big_files),
+                    allocation_observation=(dict(reported_file_allocation_bytes=self.allocation_total,
+                        paths_queried=self.allocation_paths, distinct_file_ids=len(self.allocation_ids),
+                        repeated_hardlink_paths=self.allocation_links,
+                        complete=not(self.interrupted or self.error_count or self.skip_count),
+                        reclaimable_bytes=None) if self.allocation else None),
                     largest_directories=rows(self.big_dirs),
                     extensions=[dict(extension=e, files=n, logical_bytes=s) for e,(n,s) in sorted(self.types.items(), key=lambda x:x[1][1], reverse=True)],
                     duplicate_groups=groups, error_count=self.error_count, errors=self.errors,
@@ -295,6 +320,9 @@ def render(report):
     lines = [f"Complete: {report['complete']} | Interrupted: {report['interrupted']}",
              f"Files: {report['files']} | Directories: {report['directories']} | Logical bytes: {report['logical_bytes']}",
              'Allocated/reclaimable bytes: unknown']
+    if report.get('allocation_observation') is not None:
+        lines.append('File allocation observation: ' + json.dumps(report['allocation_observation']))
+        lines.append('Allocation excludes directory/metadata overhead and is not reclaimable space.')
     for key in ('volumes', 'largest_directories', 'largest_files', 'extensions', 'duplicate_groups', 'errors', 'skipped'):
         lines.append(key + ':')
         lines.extend('  ' + json.dumps(item, ensure_ascii=False) for item in report[key])
@@ -314,6 +342,7 @@ def main(argv=None):
     parser.add_argument('--format', choices=['text', 'json'], default='text')
     parser.add_argument('--output', type=Path)
     parser.add_argument('--duplicates', action='store_true')
+    parser.add_argument('--allocation', action='store_true', help='query Windows file allocation metadata and deduplicate file IDs')
     parser.add_argument('--no-progress', action='store_true')
     args = parser.parse_args(argv)
     if args.top < 1 or (args.depth is not None and args.depth < 0):
@@ -331,7 +360,7 @@ def main(argv=None):
             if os.path.lexists(args.output):
                 raise ValueError('output already exists; refusing to overwrite')
         scanner = Scanner(args.paths, depth=args.depth, top=args.top, min_size=args.min_size,
-                          excludes=args.exclude, duplicates=args.duplicates, progress=not args.no_progress)
+                          excludes=args.exclude, duplicates=args.duplicates, progress=not args.no_progress, allocation=args.allocation)
         report = scanner.run()
         content = json.dumps(report, ensure_ascii=False, indent=2) if args.format == 'json' else render(report)
         if args.output:

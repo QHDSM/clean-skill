@@ -21,7 +21,13 @@ class AttributeTagInfo(ctypes.Structure):
     _fields_ = [('attributes', ctypes.c_uint32), ('reparse_tag', ctypes.c_uint32)]
 
 
-def capture(path):
+class StandardInfo(ctypes.Structure):
+    _fields_ = [('allocation_size', ctypes.c_int64), ('end_of_file', ctypes.c_int64),
+                ('links', ctypes.c_uint32), ('delete_pending', ctypes.c_ubyte),
+                ('directory', ctypes.c_ubyte)]
+
+
+def capture(path, *, allocation=False):
     """Query the opened leaf without following a leaf reparse point.
 
     Ancestors are checked separately and can still change concurrently. The
@@ -54,8 +60,17 @@ def capture(path):
         file_id = bytes(identity.file_id).hex()
         if identity.volume_serial == 0 or not any(identity.file_id):
             raise ValueError('filesystem returned an unavailable file identity')
-        return {'schema': SCHEMA, 'path': str(path), 'volume_serial': identity.volume_serial,
-                'file_id': file_id}
+        result = {'schema': SCHEMA, 'path': str(path), 'volume_serial': identity.volume_serial,
+                  'file_id': file_id}
+        if allocation:
+            standard = StandardInfo()
+            if not kernel.GetFileInformationByHandleEx(handle, 1, ctypes.byref(standard), ctypes.sizeof(standard)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            if standard.directory or standard.delete_pending or standard.allocation_size < 0:
+                raise ValueError('file allocation is unavailable for this object')
+            result.update(allocation_bytes=standard.allocation_size, end_of_file=standard.end_of_file,
+                          number_of_links=standard.links)
+        return result
     finally:
         kernel.CloseHandle(handle)
 

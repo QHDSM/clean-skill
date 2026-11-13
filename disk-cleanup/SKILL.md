@@ -38,11 +38,14 @@ description: Analyze Windows disk usage and carry out scoped cleanup after one t
 ```powershell
 python scripts/scan.py 'C:\' 'D:\' --format json --top 30
 python scripts/scan.py 'D:\Projects' --depth 2 --exclude 'D:\Projects\private'
+python scripts/scan.py 'D:\Projects' --allocation --format json
 ```
 
 进度在 stderr，Ctrl+C 返回部分结果。`--depth 0` 只统计根目录直属文件，更深内容标为未扫描，不能声称是完整目录大小。JSON 的 `complete`、`errors`、`skipped`、`coverage_limited` 必须反映到报告。目录大小相互嵌套不能相加；硬链接逻辑大小可能重复计算。实际占用未知时明确标注，不得等同于可释放空间。
 
 普通扫描只读元数据；重复分析显式读取候选内容。不要为了诊断读取文档、凭据或数据库内容。云占位符和重解析点跳过，不触发云文件下载。
+
+Windows 可选 `--allocation` 额外读取句柄级文件分配量，并按卷序列号及文件 ID 去重硬链接。查看 `allocation_observation` 的分配字节、覆盖完整性和查询数量；失败或跳过时只报告已观察部分。此量不包含目录及文件系统元数据开销，不证明压缩、稀疏、共享存储下的底层物理占用，也不等于可释放空间。该模式增加查询时间和文件身份记录内存，默认不启用。
 
 重复组仅表示扫描期间的 SHA-256 匹配，不表示可以删除。`distinct_file_ids_observed: false` 表示文件身份不可用，不能证明路径是独立副本；报告时明确说明。哈希前后会检查部分元数据，但无法保证原子性，也不能排除保留大小和修改时间的变化，操作前仍需重新核实。
 

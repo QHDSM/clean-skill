@@ -11,6 +11,7 @@ import unittest
 from unittest.mock import patch
 
 SCRIPT = Path(__file__).resolve().parents[1] / 'scripts' / 'scan.py'
+sys.path.insert(0, str(SCRIPT.parent))
 spec = importlib.util.spec_from_file_location('scan', SCRIPT)
 scan = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(scan)
@@ -200,6 +201,39 @@ class ScanTests(unittest.TestCase):
         self.assertEqual(scan.size_arg('1MiB'), 1048576)
         self.assertEqual(scan.size_arg('1MB'), 1000000)
         self.assertFalse(scan.within(str(self.root) + '-other', self.root))
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows allocation metadata test')
+    def test_allocation_counts_file_identity_once(self):
+        import windows_identity
+        originals = [self.root / 'a.txt', self.root / '中文' / 'b.txt', self.root / '中文' / 'c.bin']
+        expected = sum(windows_identity.capture(p, allocation=True)['allocation_bytes'] for p in originals)
+        try:
+            os.link(originals[0], self.root / 'hardlink')
+        except OSError:
+            self.skipTest('hardlinks unavailable')
+        result = self.run_scan(allocation=True)
+        observation = result['allocation_observation']
+        self.assertTrue(observation['complete'])
+        self.assertEqual(observation['reported_file_allocation_bytes'], expected)
+        self.assertEqual(observation['paths_queried'], 4)
+        self.assertEqual(observation['distinct_file_ids'], 3)
+        self.assertEqual(observation['repeated_hardlink_paths'], 1)
+        self.assertIsNone(observation['reclaimable_bytes'])
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows allocation metadata test')
+    def test_allocation_failure_reports_incomplete_observation(self):
+        import windows_identity
+        with patch.object(windows_identity, 'capture', side_effect=OSError('denied')):
+            result = self.run_scan(allocation=True)
+        self.assertFalse(result['allocation_observation']['complete'])
+        self.assertGreater(result['error_count'], 0)
+        self.assertEqual(result['files'], 3)
+
+    def test_default_scan_does_not_query_native_allocation(self):
+        import windows_identity
+        with patch.object(windows_identity, 'capture', side_effect=AssertionError('unexpected query')):
+            result = self.run_scan()
+        self.assertIsNone(result['allocation_observation'])
 
 
 if __name__ == '__main__':
