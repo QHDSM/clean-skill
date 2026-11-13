@@ -60,7 +60,7 @@ python scripts/git_audit.py '<仓库路径>' --format json
 
 ## 4. 把执行意图写成计划
 
-授权确认后先产出 `plan.json` 再执行，不要直接调删除命令。每项必须带 `path`、`action`、`risk`、`reason`、`evidence.fingerprint`（扫描时记录的 `(dev, ino, size, mtime_ns, ctime_ns)`；比对时忽略 `ctime`，Windows 读文件会连带更新它）。完整字段见 [计划格式](references/plan-schema.md)。
+授权确认后先产出 `plan.json` 用于预览，不要直接调删除命令。扫描 JSON 的 `largest_files` 和 `largest_directories` 条目含 `fingerprint`；将对应条目原样放入 `evidence.fingerprint`，不要用计划生成时的状态冒充扫描时证据。每项还须带 `path`、`action`、`risk`、`reason`。指纹是 `(dev, ino, size, mtime_ns, ctime_ns)`，比对时忽略 `ctime`；它不覆盖目录内部。未出现在 top 列表的对象需单独采集证据并如实标明时间。完整字段见 [计划格式](references/plan-schema.md)。
 
 ```json
 {"schema":"disk-cleanup-plan/v1","authorization":{"scope":["C:\\"],"excluded":[]},

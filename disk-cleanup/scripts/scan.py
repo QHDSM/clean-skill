@@ -138,10 +138,10 @@ class Scanner:
         if len(bucket) < 200:
             bucket.append({'path': str(path), 'reason': reason})
 
-    def keep(self, heap, size, path):
+    def keep(self, heap, size, path, identity):
         if size < self.min_size:
             return
-        value = (size, str(path))
+        value = (size, str(path), identity)
         if len(heap) < self.top:
             heapq.heappush(heap, value)
         elif value > heap[0]:
@@ -159,20 +159,21 @@ class Scanner:
         root_device = os.lstat(root).st_dev
         def enter(path, level):
             check_path(path)
+            identity = fingerprint(os.lstat(path))
             iterator = os.scandir(path)
-            stack.append([path, level, iterator, 0])
+            stack.append([path, level, iterator, 0, identity])
             self.dirs += 1
         try:
             enter(root, 0)
             while stack:
                 self.tick()
                 frame = stack[-1]
-                path, level, iterator, _ = frame
+                path, level, iterator, _, _identity = frame
                 try:
                     entry = next(iterator)
                 except StopIteration:
                     iterator.close()
-                    self.keep(self.big_dirs, frame[3], path)
+                    self.keep(self.big_dirs, frame[3], path, frame[4])
                     amount = frame[3]
                     stack.pop()
                     if stack:
@@ -215,7 +216,7 @@ class Scanner:
                         ext = Path(entry.name).suffix.lower() or '[no extension]'
                         self.types[ext][0] += 1
                         self.types[ext][1] += amount
-                        self.keep(self.big_files, amount, target)
+                        self.keep(self.big_files, amount, target, fingerprint(info))
                         if self.duplicates and amount >= self.min_size and amount > 0:
                             self.candidates[amount].append((target, fingerprint(info)))
                     else:
@@ -263,7 +264,8 @@ class Scanner:
                             groups.append(dict(sha256=digest, file_size_bytes=size, paths=paths))
         except KeyboardInterrupt:
             self.interrupted = True
-        rows = lambda heap: [dict(path=p, logical_bytes=s) for s, p in sorted(heap, reverse=True)]
+        rows = lambda heap: [dict(path=p, logical_bytes=s, fingerprint=list(fp))
+                             for s, p, fp in sorted(heap, reverse=True)]
         return dict(schema_version=1, roots=self.roots, exclusions=self.excludes,
                     started_at_unix=started, elapsed_seconds=round(time.time()-started, 3),
                     complete=not(self.interrupted or self.error_count or self.skip_count),
@@ -277,6 +279,7 @@ class Scanner:
                     skipped_count=self.skip_count, skipped=self.skipped,
                     notes=['Logical sizes may count hard links multiple times; allocated/reclaimable bytes are unknown.',
                            'Directory totals overlap. Errors/skips are sampled up to 200 each.',
+                           'Fingerprints capture the object metadata, not directory descendants or file contents.',
                            'Metadata is not a filesystem snapshot; concurrent changes may affect totals.'])
 
 

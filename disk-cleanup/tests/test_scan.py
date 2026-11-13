@@ -38,6 +38,11 @@ class ScanTests(unittest.TestCase):
         self.assertIsNone(result['allocated_bytes'])
         self.assertEqual(before, {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in before})
 
+    def test_top_rows_include_observed_fingerprints(self):
+        result = self.run_scan()
+        for item in result['largest_files'] + result['largest_directories']:
+            self.assertEqual(item['fingerprint'], list(scan.fingerprint(os.lstat(item['path']))))
+
     def test_depth_exclusion_and_filters(self):
         result = self.run_scan(depth=0)
         self.assertEqual(result['logical_bytes'], 4)

@@ -375,6 +375,15 @@ class RunTests(unittest.TestCase):
         report = self.run_plan(self.factory.plan([target]))
         self.assertEqual(report['summary']['skipped'], 1)
 
+    def test_scan_evidence_detects_later_file_change(self):
+        scan_result = scan.Scanner([self.cache], progress=False).run()
+        candidate = scan_result['largest_files'][0]
+        target = self.factory.target(Path(candidate['path']))
+        target['evidence']['fingerprint'] = candidate['fingerprint']
+        Path(candidate['path']).write_bytes(b'changed after scan')
+        report = self.run_plan(self.factory.plan([target]))
+        self.assertEqual(report['summary']['skipped'], 1)
+
     def test_denied_target_is_refused(self):
         target = self.factory.target(self.cache)
         target['path'] = 'C:\\Windows\\System32'

@@ -37,6 +37,8 @@
 | `evidence.fingerprint` | integer[5] | ✅ | `[st_dev, st_ino, st_size, st_mtime_ns, st_ctime_ns]`；比对时只用前四项 |
 | `evidence.git` | object\|null | ❌ | `git_audit.py` 的结论 |
 
+`scan.py --format json` 返回的 `largest_files`、`largest_directories` 每项含扫描时取得的 `fingerprint`，可直接复制到对应路径的 `evidence.fingerprint`。目录指纹记录的是目录自身在遍历开始时的状态，不代表递归内容快照，也不保证聚合大小与该指纹同时成立。扫描不是原子快照，创建计划时重新取值不能声称是扫描时证据。
+
 ### action 语义
 
 | 值 | 行为 |
