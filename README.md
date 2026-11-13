@@ -29,6 +29,7 @@
 | `scripts/tree_evidence.py` | 有限采集目录树元数据，供计划预览比较 | 无 |
 | `scripts/windows_identity.py` | 只读获取 Windows 句柄级文件身份，供计划预览比较 | 无 |
 | `scripts/windows_parents.py` | 采集完整父目录身份链，供计划预览比较 | 无 |
+| `scripts/compare_scans.py` | 比较两份已保存的扫描报告，识别可比较的增长 | 无 |
 
 重复文件扫描需显式指定 `--duplicates`，会读取候选文件内容。结果中的 `distinct_file_ids_observed` 表示是否观察到不同的非零文件身份；为 `false` 时不能证明路径是独立副本。哈希匹配只是分析线索，不能代替操作前复核。
 

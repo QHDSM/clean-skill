@@ -65,6 +65,8 @@ python scripts/git_audit.py '<仓库路径>' --format json
 
 将测量和推断分开：路径名称只是线索，不证明可删除。候选表包含路径、用途依据、逻辑大小/估计收益、操作、风险和可恢复性。未知应用只报告，不猜测。
 
+用户询问“相比上次哪里变大”时，先用 `python scripts/compare_scans.py '<旧扫描.json>' '<新扫描.json>'` 比较已有报告，详见 [扫描对比规则](references/scan-comparison.md)。只有 `comparable: true` 时使用差值；Top 列表缺席不是新增、删除或零大小的证明。基线报告含个人路径，保留本地，不上传或提交。
+
 ## 4. 把执行意图写成计划
 
 授权确认后先产出 `plan.json` 用于预览，不要直接调删除命令。扫描 JSON 的 `largest_files` 和 `largest_directories` 条目含 `fingerprint`；将对应条目原样放入 `evidence.fingerprint`，不要用计划生成时的状态冒充扫描时证据。每项还须带 `path`、`action`、`risk`、`reason`。指纹是 `(dev, ino, size, mtime_ns, ctime_ns)`，比对时忽略 `ctime`；它不覆盖目录内部。未出现在 top 列表的对象需单独采集证据并如实标明时间。完整字段见 [计划格式](references/plan-schema.md)。
