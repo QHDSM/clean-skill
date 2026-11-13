@@ -62,6 +62,45 @@ class ScanTests(unittest.TestCase):
         result = self.run_scan(duplicates=True)
         self.assertEqual(len(result['duplicate_groups']), 1)
         self.assertEqual(len(result['duplicate_groups'][0]['paths']), 2)
+        self.assertTrue(result['duplicate_groups'][0]['distinct_file_ids_observed'])
+
+    def test_duplicate_identity_unavailable_is_not_deduplicated_or_claimed_distinct(self):
+        real = scan.fingerprint
+        def without_inode(info):
+            values = list(real(info))
+            values[1] = 0
+            return tuple(values)
+        with patch.object(scan, 'fingerprint', side_effect=without_inode):
+            result = self.run_scan(duplicates=True)
+        group = result['duplicate_groups'][0]
+        self.assertEqual(len(group['paths']), 2)
+        self.assertFalse(group['distinct_file_ids_observed'])
+
+    def test_hash_ignores_change_time_only(self):
+        path = self.root / 'a.txt'
+        expected = list(scan.fingerprint(os.lstat(path)))
+        expected[4] -= 1000
+        self.assertEqual(len(scan.hash_file(path, tuple(expected))), 64)
+
+    def test_failed_hash_does_not_suppress_other_hardlink(self):
+        link = self.root / 'z-hardlink'
+        try:
+            os.link(self.root / 'a.txt', link)
+        except OSError:
+            self.skipTest('hardlinks unavailable')
+        real = scan.hash_file
+        first_identity = scan.fingerprint(os.lstat(link))[:2]
+        failed = []
+        def fail_once(path, expected):
+            if expected[:2] == first_identity and not failed:
+                failed.append(path)
+                raise OSError('simulated transient read error')
+            return real(path, expected)
+        with patch.object(scan, 'hash_file', side_effect=fail_once):
+            result = self.run_scan(duplicates=True)
+        self.assertEqual(len(failed), 1)
+        self.assertEqual(len(result['duplicate_groups']), 1)
+        self.assertGreater(result['error_count'], 0)
 
     def test_changed_hash_candidate(self):
         path = self.root / 'a.txt'

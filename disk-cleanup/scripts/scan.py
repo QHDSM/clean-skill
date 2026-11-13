@@ -92,7 +92,7 @@ def content_identity(st):
 def hash_file(path, expected):
     check_path(path)
     before = os.lstat(path)
-    if unsafe(before) or fingerprint(before) != expected:
+    if unsafe(before) or fingerprint(before)[:4] != expected[:4]:
         raise OSError('file changed before hashing')
     flags = os.O_RDONLY | getattr(os, 'O_BINARY', 0) | getattr(os, 'O_NOFOLLOW', 0)
     fd = os.open(path, flags)
@@ -105,7 +105,8 @@ def hash_file(path, expected):
             digest.update(chunk)
         if content_identity(os.fstat(stream.fileno())) != content_identity(before):
             raise OSError('file changed while hashing')
-    if fingerprint(os.lstat(path)) != expected:
+    after = os.lstat(path)
+    if unsafe(after) or fingerprint(after)[:4] != expected[:4]:
         raise OSError('file changed after hashing')
     return digest.hexdigest()
 
@@ -252,16 +253,22 @@ class Scanner:
                     identities = set()
                     for path, expected in candidates:
                         self.tick()
-                        if expected[:2] in identities:
+                        identity = expected[:2] if expected[0] != 0 and expected[1] != 0 else None
+                        if identity is not None and identity in identities:
                             continue  # Hard links are one file, not independent copies.
-                        identities.add(expected[:2])
                         try:
-                            hashes[hash_file(path, expected)].append(path)
+                            digest = hash_file(path, expected)
                         except (OSError, ValueError) as exc:
                             self.note(path, str(exc), True)
-                    for digest, paths in hashes.items():
-                        if len(paths) > 1:
-                            groups.append(dict(sha256=digest, file_size_bytes=size, paths=paths))
+                            continue
+                        if identity is not None:
+                            identities.add(identity)
+                        hashes[digest].append((path, identity is not None))
+                    for digest, matches in hashes.items():
+                        if len(matches) > 1:
+                            groups.append(dict(sha256=digest, file_size_bytes=size,
+                                               paths=[path for path, _ in matches],
+                                               distinct_file_ids_observed=all(known for _, known in matches)))
         except KeyboardInterrupt:
             self.interrupted = True
         rows = lambda heap: [dict(path=p, logical_bytes=s, fingerprint=list(fp))
@@ -280,6 +287,7 @@ class Scanner:
                     notes=['Logical sizes may count hard links multiple times; allocated/reclaimable bytes are unknown.',
                            'Directory totals overlap. Errors/skips are sampled up to 200 each.',
                            'Fingerprints capture the object metadata, not directory descendants or file contents.',
+                           'Duplicate groups are hash matches, not permission to delete; identity can be unavailable and files can change.',
                            'Metadata is not a filesystem snapshot; concurrent changes may affect totals.'])
 
 

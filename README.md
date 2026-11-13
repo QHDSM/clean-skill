@@ -28,6 +28,8 @@
 | `scripts/git_audit.py` | 只读 Git 风险审计 | 无 |
 | `scripts/tree_evidence.py` | 有限采集目录树元数据，供计划预览比较 | 无 |
 
+重复文件扫描需显式指定 `--duplicates`，会读取候选文件内容。结果中的 `distinct_file_ids_observed` 表示是否观察到不同的非零文件身份；为 `false` 时不能证明路径是独立副本。哈希匹配只是分析线索，不能代替操作前复核。
+
 `clean.py` 的安全边界（在代码里，不在文档里）：
 
 - 计划模式读取计划，不重放扫描结果；执行功能当前停用。
