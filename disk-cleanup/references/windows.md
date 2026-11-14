@@ -29,7 +29,7 @@ Windows 存储设置及“临时文件”/“清理建议”用于核实候选�
 
 清理统一经 `scripts/clean.py` 执行，不要用 `Remove-Item` 手工拼命令：
 
-- `clean.py` 当前仅预览，`--go` 一律拒绝。旧 Shell 接口的 `FOF_ALLOWUNDO` 只在可能时保留撤销信息，不能保证只进回收站；不要绕过限制。
+- `clean.py --go` 只做回收站移动，用删除后同一句柄的最终路径证明落点；`FOF_ALLOWUNDO` 只在可能时保留撤销信息，不能保证只进回收站，所以后端不靠该标志下结论。不要用 `del`、`Remove-Item`、`rd` 等绕过执行器。
 - 维护或评估恢复执行时，参考 [回收接口研究记录](recycle-research.md) 和尚未完成的验证条件。
 - 它在执行前重新 `lstat` 每个目标，与计划中的 `(st_dev, st_ino, st_size, st_mtime_ns, st_ctime_ns)` 比对；不一致就跳过。这正是为了避开「扫描时是缓存、执行时已变成别的东西」。
 - 受保护树（`C:\Windows`、`C:\$Recycle.Bin`、`C:\System Volume Information`、`C:\Recovery`、`C:\Boot`）整棵拒绝；`C:\ProgramData`、`C:\Program Files`、`C:\Users` 只拒绝目录本身，其下被明确点名的缓存子目录仍可处理。

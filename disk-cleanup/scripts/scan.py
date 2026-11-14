@@ -177,7 +177,10 @@ class Scanner:
         stack = []
         root_device = os.lstat(root).st_dev
         def enter(path, level):
-            check_path(path)
+            # Roots were validated by check_path() in __init__; every directory
+            # below them got here only because its own lstat was free of reparse
+            # points, so re-validating the whole ancestor chain per directory is
+            # both redundant and the most expensive part of a walk.
             identity = fingerprint(os.lstat(path))
             iterator = os.scandir(path)
             stack.append([path, level, iterator, 0, identity])
@@ -232,7 +235,7 @@ class Scanner:
                         self.files += 1
                         self.total += amount
                         frame[3] += amount
-                        ext = Path(entry.name).suffix.lower() or '[no extension]'
+                        ext = os.path.splitext(entry.name)[1].lower() or '[no extension]'
                         self.types[ext][0] += 1
                         self.types[ext][1] += amount
                         self.keep(self.big_files, amount, target, fingerprint(info))

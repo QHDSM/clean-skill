@@ -23,10 +23,27 @@ import scan   # noqa: E402
 import tree_evidence  # noqa: E402
 import windows_identity  # noqa: E402
 import windows_parents  # noqa: E402
+import recycle_bin  # noqa: E402
 
 
 def fingerprint_of(path):
     return list(scan.fingerprint(os.lstat(path)))
+
+
+def recycled_verdict(path):
+    """A backend verdict for one object, shaped like recycle_backend.recycle()."""
+    path = str(path)
+    return {'status': 'RECYCLED', 'detail': 'the object is inside the Recycle Bin',
+            'proof': {'method': 'handle-final-path',
+                      'final_path': '\\\\?\\C:\\$RECYCLE.BIN\\S-1\\$RABC.bin'},
+            'recycle_bin': {'i_path': 'C:\\$RECYCLE.BIN\\S-1\\$IABC.bin',
+                            'r_path': 'C:\\$RECYCLE.BIN\\S-1\\$RABC.bin',
+                            'i_exists': True,
+                            'metadata': {'version': 2, 'size_bytes': 256,
+                                         'deleted_unix': 1.0, 'original_path': path},
+                            'original_path_matches': True},
+            'volume': {'drive': 'C:', 'filesystem': 'NTFS', 'verified_capable': True,
+                       'issues': []}}
 
 
 class PlanFactory:
@@ -400,6 +417,38 @@ class RunTests(unittest.TestCase):
         self.assertEqual(report['summary']['trashed'], 0)
         self.assertTrue(self.cache.exists())
 
+    def test_dry_run_reports_objects_that_cannot_fit_in_the_bin(self):
+        target = self.factory.target(self.cache)
+        target['evidence']['size_bytes'] = 8 * 1024 * 1024
+        profile = {'drive': 'Z:', 'filesystem': 'NTFS', 'verified_capable': True,
+                   'issues': [], 'max_capacity_mb': 1, 'nuke_on_delete': 0}
+        with patch.object(clean.recycle_backend, 'volume_profile', return_value=profile):
+            report = self.run_plan(self.factory.plan([target]), go=False)
+        entry = report['results'][0]
+        self.assertIs(entry['bin_fit']['fits'], False)
+        self.assertEqual(entry['bin_fit']['max_capacity_mb'], 1)
+        self.assertEqual(report['summary']['capacity_warnings'], 1)
+        self.assertIn('Recycle Bin capacity', clean.render(report))
+
+    def test_dry_run_reports_volumes_that_cannot_be_proven(self):
+        profile = {'drive': 'Z:', 'filesystem': 'FAT32', 'verified_capable': False,
+                   'issues': ['filesystem FAT32 is not NTFS or ReFS'], 'max_capacity_mb': None,
+                   'nuke_on_delete': None}
+        with patch.object(clean.recycle_backend, 'volume_profile', return_value=profile):
+            report = self.run_plan(self.factory.plan([self.factory.target(self.cache)]), go=False)
+        self.assertEqual(report['summary']['volume_warnings'], 1)
+        self.assertIn('cannot be proven recycle-capable', clean.render(report))
+
+    def test_dry_run_survives_a_volume_probe_that_fails(self):
+        with patch.object(clean.recycle_backend, 'volume_profile',
+                          side_effect=clean.recycle_backend.BackendUnavailable('no volume access')):
+            report = self.run_plan(self.factory.plan([self.factory.target(self.cache)]), go=False)
+        entry = report['results'][0]
+        self.assertEqual(entry['result'], 'dry_run')
+        self.assertIsNone(entry['bin_fit']['fits'])
+        self.assertIn('no volume access', entry['bin_fit']['reason'])
+        self.assertEqual(report['summary']['capacity_warnings'], 0)
+
     def test_plan_digest_hashes_the_exact_bytes_validated(self):
         plan = self.factory.plan([self.factory.target(self.cache)])
         raw = json.dumps(plan).encode('utf-8')
@@ -438,15 +487,150 @@ class RunTests(unittest.TestCase):
         report = self.run_plan(self.factory.plan([target], authorization={'git_acknowledged': True}))
         self.assertEqual(report['summary']['dry_run'], 1)
 
-    def test_execution_is_disabled_before_any_action(self):
-        with self.assertRaisesRegex(clean.GateError, 'execution disabled'):
-            self.run_plan(self.factory.plan([self.factory.target(self.cache)]), go=True)
+    def test_execution_without_a_proven_recycle_is_reported_as_failed(self):
+        # The backend is mocked so this never touches a real Recycle Bin; what is
+        # under test is that an unproven verdict is never upgraded to success.
+        verdict = {'status': 'PERMANENTLY_DELETED', 'detail': 'the object entered the deleted store',
+                   'proof': {'method': 'handle-final-path', 'final_path': 'X'}, 'recycle_bin': None,
+                   'volume': {'drive': 'C:', 'filesystem': 'NTFS', 'verified_capable': True, 'issues': []}}
+        with patch.object(clean.recycle_backend, 'recycle', return_value=verdict):
+            report = self.run_plan(self.factory.plan([self.factory.target(self.cache)]), go=True)
+        self.assertEqual(report['summary']['trashed'], 0)
+        self.assertEqual(report['summary']['failed'], 1)
+        self.assertIn('deleted store', report['results'][0]['detail'])
+        self.assertEqual(report['results'][0]['recycle']['status'], 'PERMANENTLY_DELETED')
         self.assertTrue((self.cache / 'blob.bin').exists())
 
-    def test_trash_helper_is_disabled(self):
-        ok, detail = clean.trash_one(str(self.cache))
-        self.assertFalse(ok)
-        self.assertIn('execution disabled', detail)
+    def test_a_permanent_deletion_stops_the_rest_of_the_batch(self):
+        other = self.root / 'cache2'
+        other.mkdir()
+        (other / 'blob.bin').write_bytes(b'y' * 256)
+        verdict = {'status': 'PERMANENTLY_DELETED',
+                   'detail': 'the object entered the deleted store',
+                   'proof': {'method': 'handle-final-path', 'final_path': 'X'},
+                   'recycle_bin': None,
+                   'volume': {'drive': 'C:', 'filesystem': 'NTFS',
+                              'verified_capable': True, 'issues': []}}
+        plan = self.factory.plan([self.factory.target(self.cache),
+                                  self.factory.target(other)])
+        with patch.object(clean.recycle_backend, 'recycle', return_value=verdict) as recycle:
+            report = self.run_plan(plan, go=True)
+        # The Shell must not be asked to delete anything else after the proof
+        # failed: the next item could be permanently deleted too.
+        self.assertEqual(recycle.call_count, 1)
+        self.assertEqual([row['result'] for row in report['results']], ['failed', 'skipped'])
+        self.assertEqual(report['aborted_after'], str(self.cache))
+        self.assertTrue(other.exists())
+        self.assertIn('ABORTED', clean.render(report))
+
+    def test_execution_records_the_undo_evidence(self):
+        verdict = recycled_verdict(self.cache)
+        with tempfile.TemporaryDirectory() as runs:
+            with patch.object(clean, 'RUN_DIR', Path(runs)):
+                with patch.object(clean.recycle_backend, 'recycle', return_value=verdict):
+                    report = self.run_plan(self.factory.plan([self.factory.target(self.cache)]),
+                                           go=True)
+            log = report['audit_log']
+            self.assertTrue(log)
+            self.assertTrue(os.path.isfile(log))
+            lines = Path(log).read_text(encoding='utf-8').splitlines()
+        self.assertEqual(report['summary']['trashed'], 1)
+        self.assertEqual(report['results'][0]['recycle']['recycle_bin']['i_path'],
+                         verdict['recycle_bin']['i_path'])
+        # Two lines per object: the intent written before the move, then the
+        # record that carries the $I/$R pair once the move has been verified.
+        self.assertEqual([json.loads(line)['result'] for line in lines],
+                         ['attempted', 'trashed'])
+        record = json.loads(lines[1])
+        self.assertEqual(record['result'], 'trashed')
+        self.assertEqual(record['recycle_bin']['r_path'], verdict['recycle_bin']['r_path'])
+        self.assertEqual(record['proof']['final_path'], verdict['proof']['final_path'])
+        self.assertEqual(record['path'], str(self.cache))
+
+    def test_each_object_is_on_disk_before_the_next_one_runs(self):
+        # The manifest exists so that a crash still leaves an undo path for
+        # everything already moved; that only holds if each record is flushed
+        # before the next target is touched.
+        second = self.root / 'second'
+        second.mkdir()
+        (second / 'blob.bin').write_bytes(b'y' * 128)
+        seen = []
+
+        def recycle(path, size_bytes=0, expected=None):
+            if path == str(second):
+                logs = sorted(Path(clean.RUN_DIR).glob('audit-*.jsonl'))
+                seen.append([(json.loads(line)['result'], json.loads(line)['path'])
+                             for line in logs[0].read_text(encoding='utf-8').splitlines()])
+            return recycled_verdict(Path(path))
+
+        with tempfile.TemporaryDirectory() as runs:
+            with patch.object(clean, 'RUN_DIR', Path(runs)):
+                with patch.object(clean.recycle_backend, 'recycle', side_effect=recycle):
+                    report = self.run_plan(self.factory.plan([
+                        self.factory.target(self.cache),
+                        self.factory.target(second)]), go=True)
+        self.assertEqual(report['summary']['trashed'], 2)
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0], [('attempted', str(self.cache)),
+                                   ('trashed', str(self.cache)),
+                                   ('attempted', str(second))])
+
+    def test_a_failed_manifest_write_is_reported_not_hidden(self):
+        verdict = recycled_verdict(self.cache)
+
+        def refuse_fsync(fd):
+            raise OSError(28, 'No space left on device')
+
+        with tempfile.TemporaryDirectory() as runs:
+            with patch.object(clean, 'RUN_DIR', Path(runs)):
+                with patch.object(clean.recycle_backend, 'recycle', return_value=verdict):
+                    with patch.object(clean.os, 'fsync', side_effect=refuse_fsync):
+                        report = self.run_plan(self.factory.plan([self.factory.target(self.cache)]),
+                                               go=True)
+        self.assertEqual(report['summary']['trashed'], 1)
+        self.assertIsNone(report['audit_log'])
+        self.assertIn('could not be written', report['audit_warning'])
+        self.assertIn('WARNING:', clean.render(report))
+
+    def test_a_missing_run_directory_is_reported_not_fatal(self):
+        verdict = recycled_verdict(self.cache)
+        with patch.object(clean, 'RUN_DIR', self.root / 'no' / 'such' / 'dir'):
+            with patch.object(Path, 'mkdir', side_effect=OSError(13, 'Permission denied')):
+                with patch.object(clean.recycle_backend, 'recycle', return_value=verdict):
+                    report = self.run_plan(self.factory.plan([self.factory.target(self.cache)]),
+                                           go=True)
+        self.assertEqual(report['summary']['trashed'], 1)
+        self.assertIsNone(report['audit_log'])
+        self.assertIn('no undo manifest', report['audit_warning'])
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows file identity test')
+    def test_execution_re_checks_the_plan_evidence_under_the_hold(self):
+        # reverify() compares against the path; the backend compares against the
+        # held object. It must receive the values the plan was built from, or
+        # the window between the two checks stays open.
+        verdict = recycled_verdict(self.cache)
+        target = self.factory.target(self.cache)
+        captured = windows_identity.capture(self.cache)
+        target['evidence']['windows_file_id'] = captured
+        with patch.object(clean, 'RUN_DIR', self.root / 'runs'):
+            with patch.object(clean.recycle_backend, 'recycle',
+                              return_value=verdict) as backend:
+                self.run_plan(self.factory.plan([target]), go=True)
+        kwargs = backend.call_args.kwargs
+        self.assertEqual(kwargs['size_bytes'], target['evidence']['size_bytes'])
+        self.assertEqual(kwargs['expected']['mtime_ns'],
+                         target['evidence']['fingerprint'][3])
+        self.assertEqual(kwargs['expected']['identity'],
+                         {'volume_serial': captured['volume_serial'],
+                          'file_id': captured['file_id']})
+
+    def test_trash_helper_returns_the_backend_verdict_unchanged(self):
+        verdict = {'status': 'REFUSED', 'detail': 'cannot hold the object: in use',
+                   'proof': None, 'recycle_bin': None, 'volume': {}}
+        with patch.object(clean.recycle_backend, 'recycle', return_value=verdict) as backend:
+            outcome = clean.trash_one(str(self.cache), size_bytes=256)
+        self.assertEqual(outcome, verdict)
+        backend.assert_called_once_with(str(self.cache), size_bytes=256)
         self.assertTrue(self.cache.exists())
 
     def test_report_is_json_serialisable(self):
@@ -565,6 +749,209 @@ class RunTests(unittest.TestCase):
         self.assertEqual(report['summary']['not_executed'], 1)
         self.assertEqual(report['summary']['trashed'], 0)
 
+
+class UndoTests(unittest.TestCase):
+    """--undo trusts one manifest and nothing else: no bin scan, no Shell verb."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def manifest(self, rows, name='audit-20260101-000000-abcdef.jsonl'):
+        path = self.root / name
+        path.write_text(''.join(json.dumps(row, ensure_ascii=False) + '\n' for row in rows),
+                        encoding='utf-8')
+        return path
+
+    def record(self, path, i_path='C:\\$RECYCLE.BIN\\S-1\\$IABC.bin', **extra):
+        row = {'result': 'trashed', 'path': str(path), 'action': 'trash', 'risk': 'safe',
+               'recycle_bin': {'i_path': i_path,
+                               'r_path': 'C:\\$RECYCLE.BIN\\S-1\\$RABC.bin'}}
+        row.update(extra)
+        return row
+
+    def parsed(self, original, valid=True):
+        return {'valid': valid, 'original_path': original, 'issues': [],
+                'r_path': 'C:\\$RECYCLE.BIN\\S-1\\$RABC.bin',
+                'i_path': 'C:\\$RECYCLE.BIN\\S-1\\$IABC.bin',
+                'metadata': {'version': 2}}
+
+    def undo(self, path, undo_last=False):
+        args = clean.argparse.Namespace(plan=None, path=None, confirm_path=None,
+                                        risk='caution', reason=None, go=False,
+                                        undo=str(path) if path else None,
+                                        undo_last=undo_last)
+        return clean.run(args)
+
+    def test_undo_restores_only_trashed_records(self):
+        target = self.root / 'logs'
+        log = self.manifest([
+            self.record(target),
+            {'result': 'refused', 'path': str(self.root / 'nope'), 'recycle_bin': None},
+            {'result': 'dry_run', 'path': str(self.root / 'later')},
+        ])
+        with patch.object(recycle_bin, 'parse_entry', return_value=self.parsed(str(target))):
+            with patch.object(recycle_bin, 'restore',
+                              return_value={'ok': True, 'detail': 'restored',
+                                            'restored_to': str(target), 'i_removed': True}) as restore:
+                report = self.undo(log)
+        self.assertEqual(report['mode'], 'UNDO')
+        self.assertEqual(report['summary']['trashed'], 1)
+        self.assertEqual(report['summary']['refused'], 0)
+        self.assertEqual(restore.call_count, 1)
+        self.assertEqual(report['results'][0]['restored_to'], str(target))
+        self.assertEqual(report['audit_log'], str(log))
+
+    def test_undo_refuses_when_the_bin_names_another_path(self):
+        target = self.root / 'logs'
+        log = self.manifest([self.record(target)])
+        with patch.object(recycle_bin, 'parse_entry',
+                          return_value=self.parsed(str(self.root / 'somewhere-else'))):
+            with patch.object(recycle_bin, 'restore') as restore:
+                report = self.undo(log)
+        self.assertEqual(report['summary']['refused'], 1)
+        self.assertIn('different original path', report['results'][0]['detail'])
+        restore.assert_not_called()
+
+    def test_undo_skips_records_without_recycle_metadata(self):
+        log = self.manifest([{'result': 'trashed', 'path': str(self.root / 'x'),
+                              'recycle_bin': None}])
+        with patch.object(recycle_bin, 'restore') as restore:
+            report = self.undo(log)
+        self.assertEqual(report['summary']['skipped'], 1)
+        self.assertIn('no recycle metadata', report['results'][0]['detail'])
+        restore.assert_not_called()
+
+    def test_a_truncated_final_line_does_not_stop_undo(self):
+        # A power cut can leave half a record; that must cost one object, not the run.
+        target = self.root / 'logs'
+        log = self.manifest([self.record(target)])
+        with log.open('a', encoding='utf-8') as handle:
+            handle.write('{"result": "trashed", "path": "C:\\half')
+        with patch.object(recycle_bin, 'parse_entry', return_value=self.parsed(str(target))):
+            with patch.object(recycle_bin, 'restore',
+                              return_value={'ok': True, 'detail': 'restored',
+                                            'restored_to': str(target), 'i_removed': True}):
+                report = self.undo(log)
+        self.assertEqual(report['summary']['trashed'], 1)
+        self.assertEqual(len(report['log_issues']), 1)
+        self.assertIn('not JSON', report['log_issues'][0])
+
+    def test_undo_reports_a_failed_restore_instead_of_claiming_success(self):
+        target = self.root / 'logs'
+        log = self.manifest([self.record(target)])
+        with patch.object(recycle_bin, 'parse_entry', return_value=self.parsed(str(target))):
+            with patch.object(recycle_bin, 'restore',
+                              return_value={'ok': False, 'detail': 'the target path is occupied',
+                                            'restored_to': None, 'i_removed': False}):
+                report = self.undo(log)
+        self.assertEqual(report['summary']['failed'], 1)
+        self.assertIn('occupied', report['results'][0]['detail'])
+
+    def test_undo_last_uses_the_newest_manifest(self):
+        newest = self.manifest([self.record(self.root / 'logs')],
+                               name='audit-20260102-000000-ffffff.jsonl')
+        self.manifest([self.record(self.root / 'older')],
+                      name='audit-20260101-000000-000000.jsonl')
+        with patch.object(clean, 'latest_run_log', return_value=str(newest)):
+            with patch.object(recycle_bin, 'parse_entry',
+                              return_value=self.parsed(str(self.root / 'logs'))):
+                with patch.object(recycle_bin, 'restore',
+                                  return_value={'ok': True, 'detail': 'restored',
+                                                'restored_to': str(self.root / 'logs'),
+                                                'i_removed': True}):
+                    report = self.undo(None, undo_last=True)
+        self.assertEqual(report['audit_log'], str(newest))
+        # The older manifest names a different path and was never read.
+        self.assertEqual([row['path'] for row in report['results']],
+                         [str(self.root / 'logs')])
+        self.assertEqual(report['summary']['trashed'], 1)
+
+    def test_undo_rejects_a_relative_or_missing_manifest(self):
+        args = clean.argparse.Namespace(plan=None, path=None, confirm_path=None,
+                                        risk='caution', reason=None, go=False,
+                                        undo='audit.jsonl', undo_last=False)
+        with self.assertRaises(clean.GateError):
+            clean.run(args)
+        args = clean.argparse.Namespace(plan=None, path=None, confirm_path=None,
+                                        risk='caution', reason=None, go=False,
+                                        undo=str(self.root / 'nope.jsonl'), undo_last=False)
+        with self.assertRaises(clean.GateError):
+            clean.run(args)
+
+
+    def test_undo_recovers_an_object_recorded_only_as_attempted(self):
+        # The process died between the Shell move and the undo record. The intent
+        # line plus a bin lookup in a tight window is what still restores it.
+        target = self.root / 'logs'
+        log = self.manifest([{'result': 'attempted', 'path': str(target), 'ts': 1000}])
+        entry = self.parsed(str(target))
+        with patch.object(recycle_bin, 'find_entry', return_value=entry) as find:
+            with patch.object(recycle_bin, 'restore',
+                              return_value={'ok': True, 'detail': 'restored',
+                                            'restored_to': str(target), 'i_removed': True}):
+                report = self.undo(log)
+        self.assertEqual(report['summary']['trashed'], 1)
+        self.assertEqual(report['summary']['recovered'], 1)
+        self.assertTrue(report['results'][0]['recovered'])
+        self.assertIn('incomplete run', report['results'][0]['detail'])
+        self.assertEqual(find.call_args[1]['tolerance'], 5)
+        self.assertEqual(find.call_args[1]['deleted_unix'], 1000)
+
+    def test_an_attempted_record_with_no_bin_entry_is_skipped_with_a_reason(self):
+        target = self.root / 'logs'
+        log = self.manifest([{'result': 'attempted', 'path': str(target), 'ts': 1000}])
+        with patch.object(recycle_bin, 'find_entry', return_value=None):
+            with patch.object(recycle_bin, 'restore') as restore:
+                report = self.undo(log)
+        self.assertEqual(report['summary']['skipped'], 1)
+        self.assertIn('no matching Recycle Bin entry', report['results'][0]['detail'])
+        restore.assert_not_called()
+
+    def test_an_attempted_record_without_a_timestamp_uses_the_wide_window(self):
+        log = self.manifest([{'result': 'attempted', 'path': str(self.root / 'logs')}])
+        with patch.object(recycle_bin, 'find_entry', return_value=None) as find:
+            self.undo(log)
+        self.assertIsNone(find.call_args[1]['deleted_unix'])
+        self.assertEqual(find.call_args[1]['tolerance'], 120)
+
+    def test_an_attempted_record_followed_by_trashed_is_left_to_the_exact_record(self):
+        target = self.root / 'logs'
+        log = self.manifest([
+            {'result': 'attempted', 'path': str(target), 'ts': 1000},
+            self.record(target),
+        ])
+        with patch.object(recycle_bin, 'find_entry') as find:
+            with patch.object(recycle_bin, 'parse_entry', return_value=self.parsed(str(target))):
+                with patch.object(recycle_bin, 'restore',
+                                  return_value={'ok': True, 'detail': 'restored',
+                                                'restored_to': str(target), 'i_removed': True}) as restore:
+                    report = self.undo(log)
+        find.assert_not_called()
+        self.assertEqual(restore.call_count, 1)
+        self.assertEqual(report['summary']['trashed'], 1)
+        self.assertEqual(report['summary']['recovered'], 0)
+
+    def test_recovery_that_cannot_restore_is_reported_as_failed(self):
+        target = self.root / 'logs'
+        log = self.manifest([{'result': 'attempted', 'path': str(target), 'ts': 1000}])
+        with patch.object(recycle_bin, 'find_entry', return_value=self.parsed(str(target))):
+            with patch.object(recycle_bin, 'restore',
+                              return_value={'ok': False, 'detail': 'the target path is occupied',
+                                            'restored_to': None, 'i_removed': False}):
+                report = self.undo(log)
+        self.assertEqual(report['summary']['failed'], 1)
+        self.assertTrue(report['results'][0]['recovered'])
+
+    def test_a_bin_scan_error_during_recovery_is_reported_not_raised(self):
+        log = self.manifest([{'result': 'attempted', 'path': str(self.root / 'logs'), 'ts': 1000}])
+        with patch.object(recycle_bin, 'find_entry', side_effect=OSError(5, 'Access is denied')):
+            report = self.undo(log)
+        self.assertEqual(report['summary']['failed'], 1)
+        self.assertIn('Access is denied', report['results'][0]['detail'])
 
 class SinglePathTests(unittest.TestCase):
     def setUp(self):

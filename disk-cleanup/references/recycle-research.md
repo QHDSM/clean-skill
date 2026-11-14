@@ -1,6 +1,18 @@
 # Windows 可恢复执行：研究记录
 
-当前 `clean.py --go` 停用。研究候选不等于已验证可用，不得据此开启执行。
+## 现状：已落地可证明后端
+
+`scripts/recycle_backend.py` 已接入 `clean.py --go`，执行只做回收站移动。它不再依赖"原路径不存在"这种无法区分回收与永久删除的观察，而是：
+
+1. 删除前用 `CreateFileW` 以 `DELETE|FILE_READ_ATTRIBUTES`、共享 `READ|DELETE` 打开目标并**持有句柄**跨过整个 `IFileOperation`。持 DELETE 访问在别处有独占者时返回 `ERROR_SHARING_VIOLATION(32)`，所以开句柄本身就是占用探针。
+2. 删除后对同一句柄调用 `GetFinalPathNameByHandleW`：落在 `\$RECYCLE.BIN` 下判 `RECYCLED`，落在 `\$Extend\$Deleted` 下判 `PERMANENTLY_DELETED`，路径未变判 `NOT_DELETED`，其余判 `UNKNOWN`。文件 ID 前后一致，说明看的是同一个对象。
+3. 逐项 COM 回调 `PreDeleteItem` 检查 `0x80` 位（"将进入回收站"）；没有该位直接返回 `E_ABORT`，实测可挡住 SUBST 盘上的强制永久删除。`PostDeleteItem` 记录 Shell 是否给出了回收项目。
+4. 卷能力先验证：只信 NTFS/ReFS，检查当前 SID 的 `\$RECYCLE.BIN` 可写、`MaxCapacity` 足以容纳目标、`NukeOnDelete` 未开启。超出容量时 Windows 会静默转永久删除，所以这一步是拒绝而不是警告。
+5. `recycle.status` 只有 `RECYCLED` 算成功。`PERMANENTLY_DELETED`、`NOT_DELETED`、`UNKNOWN`、`REFUSED` 都按失败上报。
+
+实机验证：普通文件与嵌套目录均返回 `RECYCLED`，`proof.final_path` 指向 `$R` 对象、`recycle_bin.original_path_matches` 为真；被占用文件在开句柄阶段即 `REFUSED` 且原对象幸存；端到端 dry-run → `--go` → `--undo` 往返后内容逐字节一致。
+
+`tests/test_recycle_backend.py` 的 3 个 live 测试默认跳过，需要 `DISK_CLEANUP_LIVE_RECYCLE_TEST=1` 和现有父目录 `DISK_CLEANUP_LIVE_TEST_PARENT`。跨卷目标与“回收站被组策略禁用”现在都有明确答复：回收站按卷生效，目标总落在自己的卷上；组策略 `NoRecycleFiles=1`、`MaxCapacity=0`、`NukeOnDelete=1` 会被 `volume_profile` 读出来并判为`verified_capable=False`，`--go` 拒绝执行。仍未覆盖：并发替换目录内部。断电与进程被杀现在覆盖到"可恢复"：执行器在移动前写 intent 记录并 `fsync`，移动后写成对记录；`clean.py --undo` 对只剩 intent 的对象，用 intent 时间戳在原路径上以 ±5 秒窗口从回收站找回，报 `recovered`，实测（人为 kill 后追加半行）`restored 2 | recovered 1 | failed 0` 且文件全部回位。仍不覆盖：磁盘写入缓存未刷盘、日志文件本身被删。计划证据在持句柄期间被重验：文件 ID、大小、mtime 由句柄读回，与计划不一致则拒绝、Shell 不被调用；实测把路径换成同大小同 mtime 的另一个对象、并让 preflight 与 `reverify` 返回旧结论后，仍被拦下（对象幸存）。 句柄用 `FILE_FLAG_OPEN_REPARSE_POINT` 开在对象本身：路径在执行时变成联接点/符号链接，同样被拒（实测把目录换成指向另一个目录的 junction，status=REFUSED，目标目录与其内容完好，Shell 未被调用）。回收站条目被第三方清空不能阻止，但现在可被发现：`recycle_audit.py --journal <该次日志>` 按 `$I` 身份交叉核对，报 `present`/`missing`，并同时给出 `orphans` 分类与原路径冲突；`missing` 只表示“现在不在回收站里”，撤销过和被别人清空两种情况审计分不出。以下为研究过程记录，保留其原貌（"仍停用"等表述属于当时的结论）。
 
 `scripts/recycle_experimental.py` 是隔离原型，没有 CLI，也没有接入 `clean.py`。模拟测试覆盖接口调用顺序、执行失败与中止查询；即使 Shell 返回成功，原型也仅返回 `UNKNOWN`，不声称可恢复。该原型未完成实机验证，不应用于用户文件。
 
@@ -27,10 +39,10 @@ Windows 实机测试已覆盖 COM 初始化、接口创建、设置标志、创�
 
 实验事务现要求调用者提供此前采集的完整父目录链，使用 `capture_parent_chain(source)` 在持有句柄时记录每级路径、卷序列号和 128 位文件 ID。事务再次打开并持有整条链，从同一批句柄读取身份后逐项比较；缺失、截短、改变或不可读取时不隔离文件，日志意图包含实际验证的父目录链。临时对象测试验证：文件 ID 保持不变但父目录被替换时仍拒绝操作。此证据已通过 windows_parent_chain 字段接入正式计划预览；没有授权或认证，不证明文件内容不变或完整执行流程安全。
 
-父目录句柄和身份采集已抽取到只读模块 `windows_parents.py`，实验隔离与正式预览共用实现。预览只在检查期间持有句柄，结束即释放；正式清理仍停用。
+父目录句柄和身份采集已抽取到只读模块 `windows_parents.py`，实验隔离与正式预览共用实现。预览只在检查期间持有句柄，结束即释放；正式清理现已改由 `recycle_backend.py` 持有目标句柄（不再持有整条父目录链）。
 
-可选实机测试现将事务与真实回收后端组合：在父目录链保持句柄的情况下隔离自建文件或嵌套目录，调用回收原型，通过唯一名称与原目录找到回收项目并恢复到隔离路径，再由事务按身份回滚到原名。测试要求内容、文件 ID 和最终日志状态都匹配，且另外确认测试回调确实完成回收恢复，避免后端异常被事务回滚掩盖。本机 C、D 两块磁盘均通过该流程；这是测试内的回收后立即恢复，不等于正式清理成功，也不覆盖容量限制、不可回收策略或自动崩溃恢复。测试默认关闭，正式 --go 仍停用。
+可选实机测试现将事务与真实回收后端组合：在父目录链保持句柄的情况下隔离自建文件或嵌套目录，调用回收原型，通过唯一名称与原目录找到回收项目并恢复到隔离路径，再由事务按身份回滚到原名。测试要求内容、文件 ID 和最终日志状态都匹配，且另外确认测试回调确实完成回收恢复，避免后端异常被事务回滚掩盖。本机 C、D 两块磁盘均通过该流程；这是测试内的回收后立即恢复，不等于正式清理成功，也不覆盖容量限制、不可回收策略或自动崩溃恢复。测试默认关闭。（当时结论"正式 --go 仍停用"已被 `recycle_backend.py` 的句柄最终路径判据取代。）
 
-`recycle_sink_experimental.py` 为原型提供可选的逐项 COM 回调观察。根据 [Microsoft PostDeleteItem 文档](https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nf-shobjidl_core-ifileoperationprogresssink-postdeleteitem)，回调包含实际删除 HRESULT，非空的新项目指针表示回收站中的项目；原型只记录是否提供该指针，不在回调结束后使用借用指针。HRESULT 按失败位判断，不能仅接受零值。本机普通文件和嵌套目录实测收到非零成功值及非空回收项目，随后仍独立执行恢复和内容验证。观察器在删除前缺少回收请求标志时拒绝，但该标志仅表示尽可能回收，不能证明未来不会降级；后端仍报告 UNKNOWN，正式执行仍停用。回调检查在测试对象恢复清理后断言，避免证据断言阻断测试恢复。
+`recycle_sink_experimental.py` 为原型提供可选的逐项 COM 回调观察。根据 [Microsoft PostDeleteItem 文档](https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nf-shobjidl_core-ifileoperationprogresssink-postdeleteitem)，回调包含实际删除 HRESULT，非空的新项目指针表示回收站中的项目；原型只记录是否提供该指针，不在回调结束后使用借用指针。HRESULT 按失败位判断，不能仅接受零值。本机普通文件和嵌套目录实测收到非零成功值及非空回收项目，随后仍独立执行恢复和内容验证。观察器在删除前缺少回收请求标志时拒绝，但该标志仅表示尽可能回收，不能证明未来不会降级；当时后端因此仍报告 UNKNOWN、正式执行停用。现在的 `recycle_backend.py` 用删除后内核返回的最终路径消除这一不确定性，不再依赖该标志本身作结论。回调检查在测试对象恢复清理后断言，避免证据断言阻断测试恢复。
 
-原型新增显式拒绝删除的回调模式：`NativeAdapter(permit_delete=False)` 会强制附加观察器，即使未请求观察；`PreDeleteItem` 返回失败以取消操作。C、D 两块磁盘的自建文件和嵌套目录测试确认，回调拒绝后隔离对象仍可按身份回滚到原名，随机内容和文件 ID 保持，且没有成功回收项目的回调证据。此测试仅覆盖程序主动拒绝，不覆盖用户界面取消、系统终止或断电，也不改变正式执行入口的停用状态。
+原型新增显式拒绝删除的回调模式：`NativeAdapter(permit_delete=False)` 会强制附加观察器，即使未请求观察；`PreDeleteItem` 返回失败以取消操作。C、D 两块磁盘的自建文件和嵌套目录测试确认，回调拒绝后隔离对象仍可按身份回滚到原名，随机内容和文件 ID 保持，且没有成功回收项目的回调证据。此测试仅覆盖程序主动拒绝，不覆盖用户界面取消、系统终止或断电。当时它没有改变执行入口的停用状态；该模式（`0x80` 位检查 + `E_ABORT`）现已整合进 `recycle_backend.py` 的正式路径。

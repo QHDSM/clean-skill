@@ -1,11 +1,11 @@
 # 磁盘清理 · clean-skill
 
-## 当前状态：扫描与计划预览
+## 当前状态：可证明的回收站执行
 
-`clean.py --go` 已停用。旧 Shell 删除接口无法保证操作一定进入回收站；目录指纹也不能验证子孙文件。预览可有限查找 `.git` 标记，但不能代替风险审计或证明不存在 Git 数据。请勿把 dry-run 成功当作安全执行证明。扫描和计划预览仍可使用。
+`clean.py --go` 现在会执行，但只做回收站移动，并且每一件都能证明落点：执行器持有目标句柄跨过删除，再从内核读回对象的最终路径——在 `$RECYCLE.BIN` 下才是成功，在 `$Extend\$Deleted` 下说明被永久删除、按失败上报。逐项 COM 回调还会否决任何未被标记为回收的删除。目录指纹不能验证子孙文件；预览可有限查找 `.git` 标记，但不能代替风险审计。请勿把 dry-run 成功当作安全执行证明，也勿把"文件不见了"当作回收成功。
 
 
-面向 Windows 的 Agent Skill：分析磁盘占用、比较历史增长、识别 Git 数据风险，并生成和校验清理计划。真实执行正在实验验证，当前交付入口只做预览。
+面向 Windows 的 Agent Skill：分析磁盘占用、比较历史增长、识别 Git 数据风险，生成并校验清理计划，然后在一次授权内执行可恢复的回收站清理并核实结果。
 
 **仓库名：`clean-skill`；技能调用名：`disk-cleanup`；许可证：MIT。**
 
@@ -14,8 +14,8 @@
 1. 查看实际固定磁盘、用户目标和排除项。
 2. 展示本次授权范围、清理类型、删除方式和权限要求。
 3. 只读扫描并分类，把执行意图写成 `plan.json`（每项带路径、理由、风险与指纹）。
-4. 由 `clean.py` 校验并预览计划；真实执行目前停用。
-5. 报告实际处理结果、拒绝与跳过原因，以及每盘可用空间变化。
+4. 由 `clean.py` 校验计划；先 dry-run，确认后 `--go` 执行回收站移动。
+5. 报告每项的 `recycle.status` 与证据、拒绝与跳过原因，以及每盘可用空间变化。
 
 覆盖系统临时文件、应用缓存、开发工具、容器，以及个人文件、备份、云同步和重复文件分析。后几类默认保留；缓存也必须确认用途、位置、可重建性及使用状态。全机扫描默认选择可访问本地固定磁盘；移动、网络和远程 Docker 环境不自动纳入。
 
@@ -24,7 +24,12 @@
 | 脚本 | 能力 | 是否删除 |
 |---|---|---|
 | `scripts/scan.py` | 只读扫描、分类、重复文件检测 | **无任何删除能力** |
-| `scripts/clean.py` | 校验并预览 `plan.json` | 执行已停用 |
+| `scripts/clean.py` | 校验计划、dry-run、回收站执行与 `--undo` | 仅回收站移动 |
+| `scripts/recycle_backend.py` | 可证明的回收后端（句柄最终路径 + 回调否决 + 卷能力） | 仅回收站移动 |
+| `scripts/recycle_bin.py` | 解析 `$I`/`$R`、按卷枚举、还原 | 还原与删索引 |
+| `scripts/locks.py` | 占用探针、Restart Manager 进程归因 | 无 |
+| `scripts/recycle_selfcheck.py` | 一条命令证明本机确实能回收并还原（临时探针，走完回收→读回→还原→比对） | 仅回收站移动（探针） |
+| `scripts/recycle_audit.py` | 只读审计回收站：条目/容量、无法还原的孤儿记录、原路径冲突、某次执行的对象是否还在 | 无 |
 | `scripts/git_audit.py` | 只读 Git 风险审计 | 无 |
 | `scripts/tree_evidence.py` | 有限采集目录树元数据，供计划预览比较 | 无 |
 | `scripts/windows_identity.py` | 只读获取 Windows 句柄级文件身份，供计划预览比较 | 无 |
@@ -38,10 +43,19 @@ Windows 上可加 `--allocation` 查询文件系统报告的文件分配量。`a
 
 `clean.py` 的安全边界（在代码里，不在文档里）：
 
-- 计划模式读取计划，不重放扫描结果；执行功能当前停用。
+- 计划模式读取计划，不重放扫描结果；执行只做回收站移动。
 - 门禁校验 schema、指纹完整性、路径越权与排除项；任一项不过则**零执行**。
 - 预览时重验对象自身指纹的前四项；目录内的深层变化不一定能发现。
-- 当前任何 `--go` 都会被拒绝。
+- 执行前探占用：`--go` 用 Restart Manager 报出进程名，dry-run 只做轻量探针；被占用即拒绝并说明原因。
+- 持句柄重验：拿到句柄后、调用 Shell 前，用句柄本身重读计划证据（文件 ID、大小、mtime）；路径在检查与移动之间被替换时拒绝并说明 `the object changed after the plan was checked`，Shell 不被调用；句柄不跟随联接点，路径被换成链接时同样拒绝并说明，绝不顺着链接动它的目标。
+- 执行后读内核返回的最终路径：只有落在 `$RECYCLE.BIN` 下才记为成功；`PERMANENTLY_DELETED`、`UNKNOWN` 一律按失败上报，且一旦观测到永久删除，执行器立即中止整批（`aborted_after`），剩余目标记为 `skipped`。
+- 卷能力先验证（NTFS/ReFS、`$RECYCLE.BIN` 可写、容量够、`NukeOnDelete` 未开），不满足即拒绝而不是降级。
+- 预览即预演：dry-run 逐项给出 `bin_fit`（是否放得进回收站、卷能否被证明可回收），并汇总 `capacity_warnings`/`volume_warnings`，不用等执行才发现整批都装不下。
+- 卷能力闸门：`NoRecycleFiles=1`（组策略）、`MaxCapacity=0`、`NukeOnDelete=1`、非 NTFS/ReFS、缺当前用户回收站目录，任一命中即 `verified_capable=False`，`--go` 拒绝并给出具体原因——这些设置下删除不会进回收站。
+- 审计日志一次执行一个文件（`~/.disk-cleanup/runs/`），同时是 `--undo` 的撤销清单，独占创建不覆盖已有文件。
+- 日志边执行边追加并 `fsync`：每个对象移动前先写一条 intent 记录，移动后写带 `$I`/`$R` 的记录。进程被杀或
+  断电后 `--undo` 仍能还原已完成的项；只有 intent 记录、没有成对记录的对象，按 intent 时间戳在原路径上
+  以 ±5 秒窗口从回收站找回（报告 `recovered`），找不到就如实报 `skipped`。
 - 受保护树（`C:\Windows`、`C:\$Recycle.Bin`、`C:\Recovery` 等）整棵拒绝；`C:\ProgramData` 等只拒绝目录本身，其下被点名的缓存子目录可处理。
 - 计划格式与全部规则见 [`disk-cleanup/references/plan-schema.md`](disk-cleanup/references/plan-schema.md)。
 
@@ -82,9 +96,12 @@ Copy-Item -LiteralPath '.\disk-cleanup' -Destination $skillTarget -Recurse
 ```powershell
 python disk-cleanup/scripts/clean.py --plan plan.json --json
 python disk-cleanup/scripts/clean.py --path 'D:\tmp\x' --confirm-path 'D:\tmp\x'
+python disk-cleanup/scripts/clean.py --path 'D:\tmp\x' --confirm-path 'D:\tmp\x' --go
+python disk-cleanup/scripts/clean.py --undo 'C:\Users\me\.disk-cleanup\runs\audit-20260101-120000-abcdef.jsonl'
+python disk-cleanup/scripts/clean.py --undo-last
 ```
 
-计划模式验证范围、排除项、指纹和所提供的证据。单路径模式只预览；双输入比较规范化后的路径字符串，不证明文件身份。`--go` 当前一律以退出码 2 拒绝，且不会写执行审计日志。实验模块未连接该入口。
+计划模式验证范围、排除项、指纹和所提供的证据。单路径模式比较规范化后的路径字符串，不证明文件身份。不带 `--go` 时只预览；带 `--go` 时只做回收站移动，每一项都要有最终路径证据，见到 `PERMANENTLY_DELETED` 会中止整批，并把剩余目标记为 `skipped`。
 
 退出码：`0` 表示预览完成，不代表目标安全或已经清理；`2` 表示参数/计划被拒绝；`3` 表示有目标在预览中被拒绝。结果含实际校验字节的完整 `plan_digest`，摘要不代表用户授权。
 
@@ -136,17 +153,21 @@ python disk-cleanup/scripts/compare_scans.py reports/baseline.json reports/curre
 python -m unittest discover -s disk-cleanup/tests -v
 ```
 
-默认测试使用自建临时目录；覆盖扫描、报告比较、计划门禁、Git 审计、Windows 身份和目录链、隔离、回滚及日志中断检查。Windows 实际回收测试默认跳过，符号链接等平台能力不足时也会跳过；以当前运行输出为准。
+默认测试使用自建临时目录；覆盖扫描、报告比较、计划门禁、Git 审计、Windows 身份和目录链、隔离、回滚、撤销与崩溃恢复、日志中断检查。Windows 实际回收测试默认跳过，符号链接等平台能力不足时也会跳过；以当前运行输出为准。
 
-可选实机测试需要 Windows 和已安装的 pywin32，只操作测试自行创建的文件及目录；成功后恢复、校验并清理测试对象，失败时可能保留测试目录供检查：
+可选实机测试需要 Windows，且只操作测试自行创建的文件及目录；成功后恢复、校验并清理测试对象，失败时会话保留测试对象供检查（不会放宽断言去掩盖失败）：
 
 ```powershell
 $env:DISK_CLEANUP_LIVE_RECYCLE_TEST = '1'
-python -m unittest discover -s disk-cleanup/tests -p test_recycle_live.py -v
+$env:DISK_CLEANUP_LIVE_TEST_PARENT = '<已存在的测试父目录>'
+python -m unittest discover -s disk-cleanup/tests -v
 Remove-Item Env:DISK_CLEANUP_LIVE_RECYCLE_TEST
+Remove-Item Env:DISK_CLEANUP_LIVE_TEST_PARENT
 ```
 
-`DISK_CLEANUP_LIVE_TEST_PARENT` 可指定测试对象的现有父目录。测试不修改回收站设置或处理已有回收站项目。实机覆盖普通文件、嵌套目录、独占占用、逐项回调及程序主动取消；容量、策略、界面取消和断电等尚未完整验证。成功测试不等于正式清理能力已可用，详见[执行研究与缺口](disk-cleanup/references/recycle-research.md)。
+`recycle_backend.py` 与 `clean.py` 的回收路径是纯标准库 ctypes，实机测试不需要 pywin32。覆盖：普通文件回收、嵌套目录回收、被占用文件拒绝且幸存、`$I`/`$R` 往返还原、进程被杀后按 intent 记录恢复、组策略/容量/`NukeOnDelete` 拒绝路径（单元测试）。跨卷目标、真实断电（目前只模拟到清单半行截断）、需要管理员的卷尚未实测，详见[执行研究与缺口](disk-cleanup/references/recycle-research.md)。
+
+扫描性能实测（本机 `Z:`，447k 文件 / 218 GiB 逻辑大小，缓存预热后）：`scan.py` 全盘 **5.5s**，约 8 万文件/秒；同一棵树的朴素 `os.walk` 遍历 2.1s，但不含每文件身份、类型分类与大文件堆，且会把联接点目标一起走（本盘 `node_modules` 联接点下另有 8.5k 文件，`scan.py` 按设计不进入、不计入）。冷缓存首轮约 26s，属磁盘读放大，不是算法开销。
 
 [Agent 行为场景](disk-cleanup/tests/behavior-scenarios.md) 是独立演练清单，不代表所有宿主 Agent 已完成行为验收。
 
@@ -156,7 +177,12 @@ Remove-Item Env:DISK_CLEANUP_LIVE_RECYCLE_TEST
 - [计划格式](disk-cleanup/references/plan-schema.md)：`plan.json` 全部字段、门禁规则、退出码与路径保护规则。
 - `disk-cleanup/references/`：按场景加载的 Windows、分类和开发工具指南，附官方资料。
 - `disk-cleanup/scripts/scan.py`：只读扫描，无删除能力。
-- `disk-cleanup/scripts/clean.py`：计划校验与 dry-run；执行已停用。
+- `disk-cleanup/scripts/clean.py`：计划校验、dry-run、回收站执行与 `--undo`。
+- `disk-cleanup/scripts/recycle_backend.py`：可证明的回收后端，纯标准库。
+- `disk-cleanup/scripts/recycle_bin.py`：`$I`/`$R` 解析、按卷枚举与还原。
+- `disk-cleanup/scripts/locks.py`：占用探针与 Restart Manager 进程归因。
+- `disk-cleanup/scripts/recycle_selfcheck.py`：本机回收/还原能力的端到端自检，不碰用户路径。
+- `disk-cleanup/scripts/recycle_audit.py`：只读审计回收站与执行日志的交叉核对，不 prune、不还原。
 - `disk-cleanup/scripts/git_audit.py`：只读 Git 风险审计。
 - `disk-cleanup/tests/`：扫描与执行器测试、行为演练场景。
 

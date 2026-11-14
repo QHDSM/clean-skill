@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Plan-gated cleanup executor for Windows.
 
-Plan validation and dry-run only. Execution is disabled because the legacy Shell
-API does not guarantee recycle-only behavior. Python 3.10+, standard library only.
+Execution is Recycle Bin only, and every trashed object carries proof that it
+really landed in the bin. Python 3.10+, standard library only.
 
-Two modes:
+Three modes:
 
   python scripts/clean.py --plan plan.json                 # dry-run: show what would happen
   python scripts/clean.py --plan plan.json --go            # execute
+  python scripts/clean.py --undo <audit-log.jsonl>         # restore a run's trash
   python scripts/clean.py --path 'C:\\temp\\x' --confirm-path 'C:\\temp\\x' --go
                                                            # single-path mode, double entry
 
@@ -19,9 +20,19 @@ Safety model (enforced here, not in prose):
   4. Every target is re-verified against the fingerprint recorded at scan time
      (st_dev, st_ino, st_size, st_mtime_ns); st_ctime is recorded but not compared,
      because a read bumps it on Windows. A changed object is skipped.
-  5. Execution is disabled pending a verified recycle-only backend.
-  6. Space inside the Recycle Bin is NOT reclaimed until it is emptied; the report
+  5. The backend holds a handle across the delete and reads the object's final
+     path back from the kernel: inside the Recycle Bin means recycled, inside
+     the NTFS deleted store means permanently deleted. Only the first is
+     success. A progress-sink veto additionally refuses any delete the Shell
+     did not mark as a recycle, which is the only guard against the Shell
+     silently falling back to permanent deletion on a volume with no bin.
+  6. An object that is in use is refused before the Shell is asked, not after:
+     the backend's own handle open is the probe, and it fails with a sharing
+     violation instead of producing a half-finished move.
+  7. Space inside the Recycle Bin is NOT reclaimed until it is emptied; the report
      says so instead of claiming the space was freed.
+  8. The audit log doubles as the undo log: it records the metadata/index pair,
+     so restore never has to guess or invoke a localized Shell verb.
 """
 import argparse
 import hashlib
@@ -37,6 +48,8 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import scan  # reuse check_path / unsafe / fingerprint; read-only helpers only
 import git_discovery
+import locks
+import recycle_backend
 import tree_evidence
 import windows_identity
 import windows_parents
@@ -297,9 +310,36 @@ def reverify(target):
 
 # ------------------------------------------------------------------------- execute
 
-def trash_one(path):
-    """Refuse execution until a backend guarantees recycle-only behavior."""
-    return False, 'execution disabled: recycle-only behavior is not guaranteed'
+def plan_evidence(target):
+    """The facts the plan rested on, shaped for a check under the hold.
+
+    ``reverify`` compares against the path just before the lock probe; between
+    that check and the Shell call the path can be repointed. The backend
+    re-reads these values through the handle it holds, so the comparison is
+    about the object that would actually move.
+    """
+    evidence = target.get('evidence') or {}
+    fingerprint = evidence.get('fingerprint') or []
+    expected = {'size_bytes': evidence.get('size_bytes'),
+                'mtime_ns': fingerprint[3] if len(fingerprint) > 3 else None}
+    recorded = evidence.get('windows_file_id')
+    if isinstance(recorded, dict) and recorded.get('file_id'):
+        expected['identity'] = {'volume_serial': recorded.get('volume_serial'),
+                                'file_id': recorded.get('file_id')}
+    return expected
+
+
+def trash_one(path, *, size_bytes=0, expected=None):
+    """Trash one object and return the backend's proof-carrying verdict.
+
+    The verdict's ``status`` is the only success signal. REFUSED, FAILED and
+    UNKNOWN are all reported as failures; none of them is upgraded to "probably
+    fine", because the whole point of the backend is that "gone" is not evidence.
+    """
+    kwargs = {'size_bytes': size_bytes or 0}
+    if expected:
+        kwargs['expected'] = expected
+    return recycle_backend.recycle(path, **kwargs)
 
 
 def volume_free(path):
@@ -312,34 +352,256 @@ def volume_free(path):
 
 # --------------------------------------------------------------------------- audit
 
-def write_audit(plan_path, records, plan_digest):
-    """Append one JSONL record per action. Paths stay local; never uploaded."""
-    directory = Path.home() / '.disk-cleanup'
+RUN_DIR = Path.home() / '.disk-cleanup' / 'runs'
+
+
+class AuditJournal:
+    """Append-only run manifest: one JSONL file per run, flushed per record.
+
+    One file per run, not one per day, because the same file is also the undo
+    manifest: ``--undo`` must restore exactly the objects from one run and never
+    rescan a shared day log that also holds other runs' records.
+
+    The file is appended to and fsynced as each object is trashed instead of
+    being written once at the end. A crash, a Ctrl+C or a power cut therefore
+    leaves a usable manifest for everything that already moved; writing the whole
+    run at the end would lose precisely the case the manifest exists for. A
+    truncated final line is skipped by the reader, not treated as fatal.
+    """
+
+    def __init__(self, path, handle, plan_path, plan_digest):
+        self.path = str(path)
+        self.run_id = path.stem
+        self._handle = handle
+        self._plan = plan_path
+        self._digest = plan_digest
+        self._seq = 0
+        self.records = []
+        self.broken = False
+
+    @classmethod
+    def create(cls, plan_path, plan_digest):
+        """Open a fresh manifest, or return None when it cannot be created."""
+        import uuid
+
+        try:
+            RUN_DIR.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return None
+        # Exclusive create, retried: two runs in the same second must never share
+        # a file, because that file is also the undo manifest.
+        for _ in range(8):
+            stamp = time.strftime('%Y%m%d-%H%M%S')
+            log = RUN_DIR / f'audit-{stamp}-{uuid.uuid4().hex[:6]}.jsonl'
+            try:
+                handle = log.open('x', encoding='utf-8')
+            except FileExistsError:
+                continue
+            except OSError:
+                return None
+            return cls(log, handle, plan_path, plan_digest)
+        return None
+
+    def append(self, record):
+        """Add one undo record and force it to disk. False when it did not land."""
+        if self._handle is None:
+            return False
+        row = {'run_id': self.run_id, 'seq': self._seq, 'ts': int(time.time()),
+               'plan': self._plan, 'plan_digest': self._digest, **record}
+        try:
+            self._handle.write(json.dumps(row, ensure_ascii=False) + '\n')
+            self._handle.flush()
+            os.fsync(self._handle.fileno())
+        except (OSError, ValueError):
+            self.broken = True
+            return False
+        self._seq += 1
+        self.records.append(row)
+        return True
+
+    def close(self):
+        if self._handle is not None:
+            try:
+                self._handle.close()
+            except OSError:
+                pass
+            self._handle = None
+
+
+def latest_run_log():
+    """Newest run manifest, or None when no run has ever been recorded."""
     try:
-        directory.mkdir(parents=True, exist_ok=True)
-        log = directory / f'audit-{time.strftime("%Y%m%d")}.jsonl'
-        with log.open('a', encoding='utf-8') as handle:
-            for record in records:
-                handle.write(json.dumps({
-                    'ts': int(time.time()),
-                    'plan': plan_path,
-                    'plan_digest': plan_digest,
-                    **record,
-                }, ensure_ascii=False) + '\n')
-        return str(log)
+        candidates = sorted(RUN_DIR.glob('audit-*.jsonl'))
     except OSError:
         return None
+    return str(candidates[-1]) if candidates else None
+
+
+def _read_audit_log(path):
+    """Read an audit log without trusting it: unknown lines are counted, not fatal."""
+    records, issues = [], []
+    try:
+        with open(path, encoding='utf-8') as handle:
+            for number, line in enumerate(handle, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    issues.append(f'line {number}: not JSON')
+                    continue
+                if not isinstance(record, dict):
+                    issues.append(f'line {number}: not an object')
+                    continue
+                records.append(record)
+    except OSError as exc:
+        raise GateError(f'cannot read audit log: {exc}')
+    return records, issues
+
+
+def _recover_attempted(record, done):
+    """Undo one intent line whose companion record never made it to disk.
+
+    The run was cut off between the Shell move and the record. The bin still has
+    the object, so look it up by original path inside a tight window around the
+    intent timestamp. The window is what keeps this from grabbing an older
+    deletion of the same path; the intent line is also why this cannot run for
+    an object the run never reached.
+    """
+    import recycle_bin
+
+    path = record.get('path')
+    if not path or os.path.normcase(path) in done:
+        return None
+    item = {'path': path, 'action': 'restore', 'recovered': True}
+    drive = os.path.splitdrive(os.path.abspath(path))[0].upper()
+    if not drive:
+        item.update(result='skipped', detail='record has no absolute path')
+        return item
+    stamp = record.get('ts')
+    try:
+        entry = recycle_bin.find_entry(drive, path,
+                                       deleted_unix=stamp if stamp else None,
+                                       tolerance=5 if stamp else 120)
+    except (OSError, ValueError) as exc:
+        item.update(result='failed', detail=f'cannot look in the Recycle Bin: {exc}')
+        return item
+    if entry is None:
+        item.update(result='skipped',
+                    detail='the run ended before this object was recorded and no '
+                           'matching Recycle Bin entry exists')
+        return item
+    outcome = recycle_bin.restore(entry)
+    item.update(result='restored' if outcome['ok'] else 'failed',
+                detail='recovered after an incomplete run: ' + outcome['detail'],
+                restored_to=outcome.get('restored_to'),
+                index_removed=outcome.get('i_removed'))
+    return item
+
+
+def undo_run(args):
+    """Restore the objects a previous run trashed, using only the audit log.
+
+    The log names the exact metadata/index pair, so restore never scans the bin
+    for "something similar" and never depends on a localized Shell verb. Every
+    record is restored independently and nothing is ever overwritten: if the
+    original path has been reused, that object stays in the bin and the conflict
+    is reported instead of resolved by force.
+    """
+    import recycle_bin
+
+    path = Path(args.undo) if getattr(args, 'undo', None) else None
+    if path is None:
+        newest = latest_run_log()
+        if not newest:
+            raise GateError('no run manifest found under ' + str(RUN_DIR))
+        path = Path(newest)
+    if not path.is_absolute():
+        raise GateError('--undo must be an absolute path to an audit log')
+    if not path.is_file():
+        raise GateError(f'audit log not found: {path}')
+    records, log_issues = _read_audit_log(path)
+
+    done = {os.path.normcase(record.get('path') or '')
+            for record in records if record.get('result') == 'trashed'}
+    results = []
+    for record in records:
+        if record.get('result') == 'attempted':
+            item = _recover_attempted(record, done)
+            if item is not None:
+                results.append(item)
+            continue
+        if record.get('result') != 'trashed':
+            continue
+        original = record.get('path')
+        entry = record.get('recycle_bin') or {}
+        item = {'path': original, 'action': 'restore'}
+        if not original or not entry.get('i_path'):
+            item.update(result='skipped', detail='record has no recycle metadata')
+            results.append(item)
+            continue
+        parsed = recycle_bin.parse_entry(entry['i_path'])
+        if not parsed['valid']:
+            item.update(result='skipped',
+                        detail='metadata record is unreadable: ' + '; '.join(parsed['issues']))
+            results.append(item)
+            continue
+        # The bin's own record of where the object came from must agree with the
+        # log. A mismatch means one of the two was rewritten after the run.
+        if os.path.normcase(parsed['original_path']) != os.path.normcase(original):
+            item.update(result='refused',
+                        detail='the bin metadata names a different original path: '
+                               + parsed['original_path'])
+            results.append(item)
+            continue
+        outcome = recycle_bin.restore(parsed)
+        item.update(result='restored' if outcome['ok'] else 'failed',
+                    detail=outcome['detail'],
+                    restored_to=outcome.get('restored_to'),
+                    index_removed=outcome.get('i_removed'))
+        results.append(item)
+
+    restored = [r for r in results if r['result'] == 'restored']
+    return {
+        'mode': 'UNDO',
+        'plan': None,
+        'plan_digest': None,
+        'audit_log': str(path),
+        'execution_available': recycle_backend.availability()['available'],
+        'preview_warning': None,
+        'log_issues': log_issues,
+        'summary': {
+            'total': len(results),
+            'trashed': len(restored),
+            'dry_run': 0,
+            'skipped': len([r for r in results if r['result'] == 'skipped']),
+            'refused': len([r for r in results if r['result'] == 'refused']),
+            'not_executed': 0,
+            'failed': len([r for r in results if r['result'] == 'failed']),
+            'recovered': len([r for r in results if r.get('recovered')]),
+            'moved_bytes': 0,
+        },
+        'volumes': [],
+        'recycle_bin_note': None,
+        'results': results,
+    }
 
 
 # ---------------------------------------------------------------------------- main
 
 def run(args):
+    if getattr(args, 'undo', None) or getattr(args, 'undo_last', False):
+        return undo_run(args)
     if args.go:
-        raise GateError('execution disabled: recycle-only behavior is not guaranteed')
+        backend = recycle_backend.availability()
+        if not backend['available']:
+            raise GateError(f'execution unavailable: {backend["reason"]}')
     if not args.plan and not args.path:
         raise GateError('either --plan or --path is required')
 
-    records, results = [], []
+    results = []
+    audit_warning = None
     refused, skipped = [], []
     before, after = {}, {}
 
@@ -379,7 +641,14 @@ def run(args):
             if denied:
                 raise GateError(f'refused: {denied}')
 
-    for target in targets:
+    aborted_after = None
+    # Created before the first target: if the process dies mid-run, every object
+    # already in the bin still has its undo record on disk.
+    journal = AuditJournal.create(args.plan, digest) if args.go else None
+    # Recycle Bin capacity is per volume, so the preview resolves it once.
+    profiles = {}
+
+    for position, target in enumerate(targets):
         path = target['path']
         entry = {'path': path, 'action': target['action'], 'risk': target['risk']}
 
@@ -454,7 +723,52 @@ def run(args):
         entry['size_bytes'] = target['evidence'].get('size_bytes')
         entry['fingerprint'] = target['evidence']['fingerprint']
 
+        # An object that something else holds open cannot be recycles; asking the
+        # Shell anyway produces a half-finished move at best. Probe first, and in
+        # a dry run also say so, because "this will be refused" is the useful
+        # prediction. The full Restart Manager lookup (which names the process)
+        # only runs when the probe already says no, plus during --go.
+        if args.go:
+            held = locks.blockers(path)
+        else:
+            probe = locks.probe_deletable(path)
+            held = {'deletable': probe['deletable'], 'reason': probe['reason'],
+                    'processes': [], 'issues': probe.get('issues', []),
+                    'complete': probe['deletable'] is not None}
+        if held['deletable'] is not True:
+            processes = [p for p in held.get('processes', []) if p.get('pid')]
+            detail = held['reason'] or 'deletability unknown'
+            if processes:
+                detail += ' (held by ' + ', '.join(
+                    f"{p.get('app') or 'unknown'} [pid {p['pid']}]" for p in processes[:4]) + ')'
+            entry.update(result='refused', detail=detail,
+                         blockers={'reason': held['reason'], 'processes': processes,
+                                   'complete': held.get('complete')})
+            refused.append(entry)
+            results.append(entry)
+            continue
+
         if not args.go:
+            # Ask the same questions --go would ask, so a plan whose objects cannot
+            # fit in the bin is visible before anything moves. Windows silently
+            # offers a permanent delete for an oversized object; we refuse, but the
+            # preview should say so up front.
+            drive = os.path.splitdrive(os.path.abspath(path))[0].upper()
+            try:
+                profile = profiles.get(drive)
+                if profile is None:
+                    profile = profiles[drive] = recycle_backend.volume_profile(drive)
+                fits, why = recycle_backend.fits_capacity(profile, entry.get('size_bytes') or 0)
+                entry['bin_fit'] = {
+                    'fits': fits, 'reason': why,
+                    'max_capacity_mb': profile.get('max_capacity_mb'),
+                    'verified_capable': profile.get('verified_capable'),
+                    'issues': profile.get('issues', []),
+                }
+            except recycle_backend.BackendUnavailable as exc:
+                entry['bin_fit'] = {'fits': None, 'reason': str(exc),
+                                    'max_capacity_mb': None,
+                                    'verified_capable': None, 'issues': []}
             entry.update(result='dry_run', detail='preview only; execution disabled')
             results.append(entry)
             continue
@@ -462,14 +776,57 @@ def run(args):
         key = os.path.splitdrive(os.path.abspath(path))[0].upper()
         if key not in before:
             before[key] = volume_free(path)
-        moved, detail = trash_one(path)
-        entry.update(result='trashed' if moved else 'failed', detail=detail)
+        if journal is not None:
+            # Written before the move: if the process dies between the Shell
+            # putting the object in the bin and the record below landing, this
+            # intent line is what lets --undo find the object again.
+            journal.append({'result': 'attempted', 'path': path,
+                            'action': target['action'], 'risk': target['risk'],
+                            'size_bytes': entry.get('size_bytes')})
+        outcome = trash_one(path, size_bytes=entry['size_bytes'],
+                            expected=plan_evidence(target))
+        moved = outcome['status'] == 'RECYCLED'
+        entry.update(result='trashed' if moved else 'failed', detail=outcome['detail'])
+        entry['recycle'] = {
+            'status': outcome['status'],
+            'proof': outcome.get('proof'),
+            'recycle_bin': outcome.get('recycle_bin'),
+            'volume': {k: outcome.get('volume', {}).get(k) for k in
+                       ('drive', 'filesystem', 'verified_capable', 'issues')},
+        }
         if moved:
-            records.append({k: entry.get(k) for k in
-                            ('path', 'action', 'risk', 'result', 'detail', 'size_bytes')})
+            if journal is None:
+                if audit_warning is None:
+                    audit_warning = ('no undo manifest could be created; objects moved so '
+                                     'far can still be restored from the Recycle Bin, but '
+                                     'not by --undo')
+            elif not journal.append({
+                    'path': path, 'action': target['action'], 'risk': target['risk'],
+                    'result': 'trashed', 'detail': outcome['detail'],
+                    'size_bytes': entry.get('size_bytes'),
+                    'recycle_bin': outcome.get('recycle_bin'),
+                    'proof': outcome.get('proof'),
+            }):
+                audit_warning = (f'the undo record for {path} could not be written; '
+                                 'that object can still be restored from the Recycle '
+                                 'Bin, but not by --undo')
         else:
             refused.append(entry)
         results.append(entry)
+
+        if outcome['status'] == 'PERMANENTLY_DELETED':
+            # The volume guarantee just failed for real: stop instead of asking
+            # the Shell to delete anything else and hoping the next one is
+            # recycled. Remaining targets are reported as skipped, not untouched
+            # silently.
+            aborted_after = path
+            for later in targets[position + 1:]:
+                skip = {'path': later['path'], 'action': later['action'],
+                        'risk': later['risk'], 'result': 'skipped',
+                        'detail': 'aborted after a permanent deletion was observed'}
+                skipped.append(skip)
+                results.append(skip)
+            break
 
     if args.go:
         for target in targets:
@@ -477,15 +834,24 @@ def run(args):
             if key in before and key not in after:
                 after[key] = volume_free(target['path'])
 
-    log_path = write_audit(args.plan, records, digest) if (args.go and records) else None
+    if journal is not None:
+        journal.close()
+    log_path = journal.path if (journal is not None and not journal.broken
+                                and journal.records) else None
+    if args.go and log_path is None and audit_warning is None and journal is not None \
+            and journal.records:
+        audit_warning = ('the run manifest could not be written; these objects can still be '
+                         'restored from the Recycle Bin, but not by --undo')
 
     trashed = [r for r in results if r['result'] == 'trashed']
     freed = sum(r.get('size_bytes') or 0 for r in trashed)
+    backend = recycle_backend.availability()
     return {
         'mode': 'EXECUTED' if args.go else 'DRY-RUN',
         'plan': args.plan,
         'plan_digest': digest,
-        'execution_available': False,
+        'execution_available': backend['available'],
+        'execution_unavailable_reason': None if backend['available'] else backend['reason'],
         'preview_warning': 'Directory contents and Git risks are not fully verified.',
         'summary': {
             'total': len(results),
@@ -495,6 +861,10 @@ def run(args):
             'refused': len(refused),
             'not_executed': len([r for r in results if r['result'] == 'not_executed']),
             'failed': len([r for r in results if r['result'] == 'failed']),
+            'capacity_warnings': len([r for r in results
+                                      if (r.get('bin_fit') or {}).get('fits') is False]),
+            'volume_warnings': len([r for r in results
+                                    if (r.get('bin_fit') or {}).get('verified_capable') is False]),
             'moved_bytes': freed,
         },
         'volumes': [{'drive': d, 'free_before': before[d], 'free_after': after.get(d)}
@@ -503,18 +873,33 @@ def run(args):
             'Moved items sit in the Recycle Bin. Space is NOT reclaimed until it is '
             'emptied; the volume figures above may show no change.' if trashed else None),
         'audit_log': log_path,
+        'audit_warning': audit_warning,
+        'aborted_after': aborted_after,
         'results': results,
     }
 
 
 def render(report):
     lines = [f"=== {report['mode']} ===", f"plan: {report['plan'] or '(single path)'}"]
-    lines.append('Execution disabled. ' + report['preview_warning'])
+    if report['mode'] == 'UNDO':
+        lines.append('audit: ' + report['audit_log'])
+    elif not report.get('execution_available'):
+        lines.append('Execution unavailable: '
+                     + (report.get('execution_unavailable_reason') or 'unknown'))
+    elif report['mode'] == 'DRY-RUN':
+        lines.append('Dry-run only; add --go to execute. ' + report['preview_warning'])
     summary = report['summary']
+    verb = 'restored' if report['mode'] == 'UNDO' else 'trashed'
     lines.append(
-        'total %d | trashed %d | dry-run %d | skipped %d | refused %d | failed %d'
-        % (summary['total'], summary['trashed'], summary['dry_run'],
+        'total %d | %s %d | dry-run %d | skipped %d | refused %d | failed %d'
+        % (summary['total'], verb, summary['trashed'], summary['dry_run'],
            summary['skipped'], summary['refused'], summary['failed']))
+    if summary.get('capacity_warnings'):
+        lines.append('  WARNING: %d target(s) exceed the Recycle Bin capacity; --go would '
+                     'refuse them. Split or shrink the batch.' % summary['capacity_warnings'])
+    if summary.get('volume_warnings'):
+        lines.append('  WARNING: %d target(s) are on volumes that cannot be proven '
+                     'recycle-capable.' % summary['volume_warnings'])
     for item in report['results']:
         lines.append('  %-10s %s' % (item['result'], item['path']))
         discovery = item.get('git_discovery')
@@ -532,6 +917,12 @@ def render(report):
         comparison = item.get('tree_metadata_comparison')
         if comparison and comparison.get('matched'):
             lines.append('             Tree metadata matched; contents and concurrent changes remain unverified')
+        fit = item.get('bin_fit')
+        if fit and fit.get('fits') is False:
+            lines.append('             ↳ Recycle Bin would not hold it: %s' % fit['reason'])
+        elif fit and fit.get('verified_capable') is False:
+            lines.append('             ↳ Volume not proven recycle-capable: %s'
+                         % '; '.join(fit.get('issues') or ['unknown']))
         if item.get('detail') and item['result'] != 'dry_run':
             lines.append('             ↳ %s' % item['detail'])
     if report['volumes']:
@@ -547,6 +938,11 @@ def render(report):
         lines.append('note: ' + report['recycle_bin_note'])
     if report['audit_log']:
         lines.append('audit: ' + report['audit_log'])
+    if report.get('audit_warning'):
+        lines.append('WARNING: ' + report['audit_warning'])
+    if report.get('aborted_after'):
+        lines.append('ABORTED: a permanent deletion was observed at '
+                     + report['aborted_after'] + '; nothing after it was executed')
     return '\n'.join(lines)
 
 
@@ -559,6 +955,9 @@ def main(argv=None):
     parser.add_argument('--risk', choices=['safe', 'caution'], default='caution')
     parser.add_argument('--reason', help='why this target is disposable')
     parser.add_argument('--go', action='store_true', help='execute (default is dry-run)')
+    parser.add_argument('--undo', help='restore what an audit log says was trashed')
+    parser.add_argument('--undo-last', action='store_true',
+                        help='restore the most recent run')
     parser.add_argument('--json', action='store_true', help='machine-readable output')
     args = parser.parse_args(argv)
 
