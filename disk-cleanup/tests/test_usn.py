@@ -118,6 +118,20 @@ class ResolveTests(unittest.TestCase):
         self.assertIn(101, cache)
 
 
+class JoinPathTests(unittest.TestCase):
+    def test_a_direct_child_of_the_root_keeps_the_drive_letter(self):
+        # resolve() is relative to the volume root; dropping the drive here
+        # produced paths that could not be stat'ed.
+        self.assertEqual(usn.join_path('C:', 'Users', 'file.txt'), 'C:\\Users\\file.txt')
+
+    def test_a_nested_path_keeps_the_drive_letter(self):
+        self.assertEqual(usn.join_path('C:', 'Users\\20253\\AppData', 'x.log'),
+                         'C:\\Users\\20253\\AppData\\x.log')
+
+    def test_a_child_of_the_root_itself(self):
+        self.assertEqual(usn.join_path('C:', '', 'Windows'), 'C:\\Windows')
+
+
 class ClassifyTests(unittest.TestCase):
     def check(self, reason, expected):
         self.assertEqual(usn.classify({'reason': reason}), expected)

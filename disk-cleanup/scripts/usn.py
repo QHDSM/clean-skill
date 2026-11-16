@@ -194,6 +194,17 @@ def resolve(frn, entries, cache=None, depth=0):
     return result
 
 
+def join_path(drive, parent, name):
+    """Absolute path for a change.
+
+    resolve() returns a path relative to the volume root, so the drive letter
+    always has to be added back. Doing it only when the parent is empty loses
+    the drive on every direct child of the root.
+    """
+    base = (parent + '\\') if parent else ''
+    return drive + '\\' + base + name
+
+
 def classify(record):
     """Collapse a reason bitmask into the one verb a report can carry."""
     names = _decode_reasons(record['reason'])
@@ -365,16 +376,20 @@ def cmd_since(args):
         volume.close()
 
     cache, changes = {}, []
+    unresolved = []
     for record in records:
         if record['reason'] & 0x80000000 and record['reason'] & 0x00000200 == 0:
             continue  # pure close events say nothing about content
         parent = resolve(record['parent'], entries, cache)
         if parent is None:
-            changes.append({'action': classify(record), 'path': None,
-                            'name': record['name'], 'unresolved_parent': record['parent'],
-                            'reasons': _decode_reasons(record['reason'])})
+            # The parent is missing from the index, so the absolute path is
+            # unknown. Say so and keep the name; a null path with a null
+            # reason reads like a broken tool rather than a missing directory.
+            unresolved.append({'action': classify(record), 'name': record['name'],
+                               'unresolved_parent': record['parent'],
+                               'reasons': _decode_reasons(record['reason'])})
             continue
-        full = (parent + '\\' + record['name']) if parent else (volume.drive + '\\' + record['name'])
+        full = join_path(volume.drive, parent, record['name'])
         changes.append({'action': classify(record), 'path': full,
                         'reasons': _decode_reasons(record['reason']),
                         'usn': record['usn']})
@@ -390,23 +405,32 @@ def cmd_since(args):
     counts = {}
     for change in changes:
         counts[change['action']] = counts.get(change['action'], 0) + 1
+    for change in unresolved:
+        counts[change['action']] = counts.get(change['action'], 0) + 1
     result = {'schema': SCHEMA_CHANGES, 'ok': True, 'drive': volume.drive,
               'from_usn': header['next_usn'], 'to_usn': cursor,
               'counts': counts, 'changes': changes,
-              'complete': all(change['path'] for change in changes),
+              'unresolved': unresolved,
+              'complete': not unresolved,
               'caveats': [
                   'USN records give names, parents and reasons, not sizes; stat the listed paths for bytes.',
                   'A rename appears as two records (old name, then new name).',
                   'Close-only events are dropped; they do not indicate new content.',
                   'The map is a point-in-time index: if the journal wrapped, this refuses instead of guessing.',
+                  'Entries whose parent is missing from the index are listed under "unresolved"; '
+                  'their names are known but their absolute path is not.',
               ]}
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
     else:
         for change in changes:
-            print(f"{change['action']:<14} {change['path'] or '(unresolved) ' + str(change.get('name'))}")
+            print(f"{change['action']:<14} {change['path']}")
+        for change in unresolved:
+            print(f"{change['action']:<14} (unresolved) {change['name']}")
         print(f"\n{len(changes)} change(s): " +
               ', '.join(f'{k}={v}' for k, v in sorted(counts.items())))
+        if unresolved:
+            print(f'{len(unresolved)} unresolved: the parent directory is not in the index')
     return 0
 
 
