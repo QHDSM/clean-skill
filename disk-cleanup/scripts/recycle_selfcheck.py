@@ -113,8 +113,10 @@ def run(drive=None, keep_evidence=False):
             _stage(results, 'metadata', False, 'no $I record was found for the probe')
             return report
         parsed = recycle_bin.parse_entry(entry['i_path'])
-        matches = (os.path.normcase(parsed['original_path'])
-                   == os.path.normcase(str(probe)))
+        # The Shell records the path as it saw it, which is not always the
+        # spelling this script has. Compare canonically, or a machine that
+        # stores a short name or a \\?\ prefix fails a check that passed.
+        matches = recycle_bin.same_path(parsed['original_path'], str(probe))
         _stage(results, 'metadata', matches,
                'original_path={}'.format(parsed['original_path']),
                metadata={key: parsed[key] for key in

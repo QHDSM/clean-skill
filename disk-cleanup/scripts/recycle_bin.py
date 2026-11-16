@@ -67,6 +67,53 @@ def _invalid(result, message):
     return result
 
 
+def canonical_path(path):
+    """Normalise a path so two spellings of the same file compare equal.
+
+    The Recycle Bin records the path as Windows handed it to the Shell, and
+    that spelling is not always the one the caller has. A hosted runner stored
+    a path that did not compare equal to the very file it had just trashed.
+    The forms seen in the wild: the \\\\?\\ long-path prefix, the 8.3 short
+    name for a directory whose long name was not enabled, a trailing separator,
+    and a different case. This strips the prefix, resolves the short name, and
+    normalises the rest.
+    """
+    if not isinstance(path, str) or not path:
+        return ''
+    text = path
+    if text.startswith('\\\\?\\'):
+        text = text[4:]
+    elif text.startswith('\\\\.\\'):
+        # A device path: keep the drive letter, drop the rest of the device.
+        text = text[4:]
+    text = text.replace('/', '\\')
+    if len(text) > 3 and text.endswith('\\'):
+        text = text[:-1]
+    try:
+        resolved = os.path.abspath(text)
+    except (OSError, ValueError):
+        resolved = text
+    if os.name == 'nt':
+        # os.path.abspath does not expand an 8.3 short name; the Shell does.
+        try:
+            import ctypes
+            buffer = ctypes.create_unicode_buffer(32768)
+            length = ctypes.c_ulong(len(buffer))
+            if ctypes.windll.kernel32.GetLongPathNameW(
+                    text, buffer, ctypes.byref(length)):
+                resolved = buffer.value
+        except (AttributeError, OSError, ValueError):
+            pass
+    return os.path.normcase(os.path.normpath(resolved))
+
+
+def same_path(left, right):
+    """True when two paths name the same object, whatever their spelling."""
+    if not left or not right:
+        return False
+    return canonical_path(left) == canonical_path(right)
+
+
 def _decode_path(raw):
     """Decode a NUL-terminated UTF-16LE path and drop the terminator.
 
@@ -315,15 +362,18 @@ def bin_usage(drive):
 def find_entry(drive, original_path, deleted_unix=None, tolerance=120):
     """Return the best entry for a path, or None when none matches.
 
-    Matching is an exact os.path.normcase comparison, not a prefix or glob, so
-    'C:\\Temp' never matches 'C:\\Temp2'. When deleted_unix is None and a path
-    was deleted repeatedly, the most recent deletion wins; None therefore does
-    not prove the item is absent, only that this scan found no candidate.
+    Matching is an exact canonical comparison, not a prefix or glob, so
+    'C:\\Temp' never matches 'C:\\Temp2'. The comparison resolves the
+    long-path prefix and 8.3 short names, because the Shell records the
+    path as it saw it and that spelling need not be the caller's. When
+    deleted_unix is None and a path was deleted repeatedly, the most recent
+    deletion wins; None therefore does not prove the item is absent, only
+    that this scan found no candidate.
     """
     scan = entries_for_volume(drive)
-    wanted = os.path.normcase(original_path)
+    wanted = canonical_path(original_path)
     candidates = [entry for entry in scan['entries']
-                  if os.path.normcase(entry['original_path']) == wanted]
+                  if canonical_path(entry['original_path']) == wanted]
     if not candidates:
         return None
     if deleted_unix is None:

@@ -38,6 +38,51 @@ def build_v1(original_path, *, size_bytes=42, deleted_unix=1_700_000_000.0):
             + encoded.ljust(520, b'\x00'))
 
 
+class CanonicalPathTests(unittest.TestCase):
+    """The Shell records the path as it saw it, not as the caller spelled it."""
+
+    def test_the_same_path_in_two_spellings_is_equal(self):
+        self.assertTrue(recycle_bin.same_path('C:////Temp////a.txt', 'c:////temp////A.TXT'))
+
+    def test_a_long_path_prefix_is_stripped(self):
+        self.assertTrue(recycle_bin.same_path('\\\\?\\C:////Temp////a.txt', 'C:////Temp////a.txt'))
+
+    def test_a_trailing_separator_does_not_matter(self):
+        self.assertTrue(recycle_bin.same_path('C:////Temp////', 'C:////Temp'))
+
+    def test_different_paths_are_not_equal(self):
+        self.assertFalse(recycle_bin.same_path('C:////Temp', 'C:////Temp2'))
+
+    def test_empty_paths_are_never_equal(self):
+        self.assertFalse(recycle_bin.same_path('', ''))
+        self.assertFalse(recycle_bin.same_path('C:////Temp', ''))
+
+    def test_a_relative_path_is_made_absolute(self):
+        self.assertEqual(recycle_bin.canonical_path('Temp\\a.txt'),
+                         recycle_bin.canonical_path(os.path.abspath('Temp\\a.txt')))
+
+    def test_forward_slashes_are_accepted(self):
+        self.assertTrue(recycle_bin.same_path('C:/Temp/a.txt', 'C:////Temp////a.txt'))
+
+    @unittest.skipUnless(os.name == 'nt', 'short names are a Windows notion')
+    def test_an_eight_dot_three_name_resolves_to_the_long_name(self):
+        import ctypes
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp) / 'a-very-long-directory-name-for-short-names'
+            directory.mkdir()
+            probe = directory / 'probe.txt'
+            probe.write_bytes(b'x')
+            buffer = ctypes.create_unicode_buffer(32768)
+            length = ctypes.c_ulong(len(buffer))
+            ok = ctypes.windll.kernel32.GetShortPathNameW(
+                str(directory), buffer, ctypes.byref(length))
+            if not ok or buffer.value == str(directory):
+                self.skipTest('short names are not enabled on this volume')
+            short = buffer.value
+            self.assertTrue(recycle_bin.same_path(str(probe), str(Path(short) / 'probe.txt')))
+
+
 class ParseEntryTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
