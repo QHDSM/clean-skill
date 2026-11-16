@@ -1,4 +1,4 @@
-name: End-to-end recycle
+name: ZZ renamed probe
 
 # Separate from test.yml on purpose: this job moves real files through the
 # Recycle Bin and restores them. A hosted runner that cannot recycle should not
