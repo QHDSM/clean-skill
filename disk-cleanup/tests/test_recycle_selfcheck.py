@@ -156,6 +156,17 @@ class CliTests(unittest.TestCase):
         self.assertEqual(payload['schema'], selfcheck.SCHEMA)
         self.assertIsInstance(payload['stages'], list)
 
+    def test_help_is_rendered_without_raising(self):
+        # The help text once carried a bare %T, which argparse expands as a
+        # printf-style field: --help raised ValueError instead of printing.
+        with patch.object(sys, 'argv', ['recycle_selfcheck.py', '--help']):
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                with self.assertRaises(SystemExit) as raised:
+                    selfcheck.main()
+        self.assertEqual(raised.exception.code, 0)
+        self.assertIn('--drive', buffer.getvalue())
+
 
 @unittest.skipUnless(os.environ.get('DISK_CLEANUP_LIVE_RECYCLE_TEST') == '1',
                      'set DISK_CLEANUP_LIVE_RECYCLE_TEST=1 to move a real probe file')

@@ -1,7 +1,7 @@
 # 交接文档：disk-cleanup skill（2026-11-16）
 
 > 接手者请先完整读一遍本文档，再动手。文档里带 ⚠️ 的段落是**踩过坑之后写下的纪律**，不是建议。
-> 文档中所有事实都经过实测核对，数字以本文档记录的时刻为准（`2026-11-16 17:24`）。
+> 文档中所有事实都经过实测核对，数字以本文档记录的时刻为准（`2026-11-16 19:05`）。
 
 ---
 
@@ -11,10 +11,10 @@
 |---|---|
 | 项目名 | `disk-cleanup`（Windows 磁盘清理 agent skill） |
 | 交付仓库 | `QHDSM/clean-skill`（公开，MIT） |
-| 远端 HEAD | 见 `git log -1`（本文档写作时为 `624cb7d`） |
+| 远端 HEAD | 见 `https://api.github.com/repos/QHDSM/clean-skill/commits/main`（或 `git ls-remote`）。**别拿它和本地 HEAD 比 SHA**：两边历史不是同一条链，要逐 blob 比 tree（§7.2） |
 | 本地 HEAD | **提交数与文件数以 `git rev-list --count HEAD` / `git ls-files | wc -l` 为准**——本文档自身会改变这两个数字，所以不写死 |
 | 跟踪文件 | 63（本文档写作时） |
-| 测试 | `Ran 423, OK (skipped=18)` |
+| 测试 | `Ran 424, OK (skipped=18)` |
 | CI | `Validate scanner` ✅ / `End-to-end recycle` ✅（均为绿） |
 | 运行时 | Python 3.10+，**纯标准库**，无第三方依赖 |
 | 平台 | Windows（NTFS / ReFS）。其他平台仅供开发测试 |
@@ -33,11 +33,11 @@ Z:\磁盘清理-skill\
 ├── 00-交付物\                    ← 交付物与离线产物
 │   ├── disk-cleanup-src\         ← ★ 真正的 git 仓库（工作目录）
 │   ├── push_via_api.py           ← 推送脚本（不在仓库内，见 §7.2）
-│   ├── clean-skill.bundle        ← 全量历史打包，280KB
+│   ├── clean-skill.bundle        ← 全量历史打包，约 300KB（以文件实际大小为准）
 │   ├── 0001-0002-cleanup-executor.patch
 │   ├── 0003-NNNN-provable-executor.patch   ← 第 3 个到最后一个提交（NNNN=总提交数）
 │   └── 推送说明.md               ← 同步状态快照
-├── 01-竞品研究\                  ← 24 个竞品的分析与源码
+├── 01-竞品研究\                  ← 竞品分析与 12 份竞品源码
 │   ├── 01-市场测算.md / 02-深度学习-12个L5.md / 04-首轮竞品全景.md
 │   └── 03-竞品源码\  （01-Mole … 12-AvdLee-xcode-disk-cleanup）
 ├── 02-逆向工程\                  ← 对 std-microblock 的 REA 逆向
@@ -47,7 +47,9 @@ Z:\磁盘清理-skill\
 │   ├── 02-实施记录.md
 │   ├── 03-实施记录-可证明回收.md
 │   ├── 04-实施记录-注册表增量与目标模式.md
-│   └── 05-实施记录-USN实机与托管runner.md
+│   ├── 05-实施记录-USN实机与托管runner.md
+│   └── 06-交接文档.md            ← 本文档（副本之一，见文首）
+├── README.md                     ← 工作区总说明（不在仓库内）
 └── .workbuddy\memory\            ← 工作区记忆
     └── 2026-11-16.md
 ```
@@ -64,7 +66,7 @@ Z:\磁盘清理-skill\
 
 ```
 disk-cleanup-src\
-├── README.md                    ← 用户面向的完整说明（12,714 字符）
+├── README.md                    ← 用户面向的完整说明（12,503 字符）
 ├── LICENSE                      ← MIT
 ├── .gitattributes               ← `* text=auto eol=lf`
 ├── .gitignore                   ← 排除 plan*.json / audit-*.jsonl / reports/
@@ -72,15 +74,15 @@ disk-cleanup-src\
 │   ├── test.yml                 ← 单元测试，Python 3.10 + 3.12 矩阵
 │   └── e2e.yml                  ← 真实回收→撤销，每次 push 都跑
 └── disk-cleanup\                ← ★ skill 本体
-    ├── SKILL.md                 ← agent 行为契约（10,697 字符）
+    ├── SKILL.md                 ← agent 行为契约（10,552 字符）
     ├── references\
     │   ├── plan-schema.md       ← ★ 计划格式、门禁规则、退出码、路径保护
     │   ├── targets.json         ← ★ 声明式候选注册表（16 条）
     │   ├── recycle-research.md  ← 回收站实现研究与 freedesktop 规范对照
     │   ├── windows.md / cleanup-categories.md / development-tools.md
     │   └── scan-comparison.md
-    ├── scripts\  (24 个, 6,874 行)
-    └── tests\    (22 个, 5,049 行)
+    ├── scripts\  (24 个, 6,875 行)
+    └── tests\    (22 个, 5,060 行)
 ```
 
 ### 2.1 脚本职责与规模
@@ -97,9 +99,9 @@ disk-cleanup-src\
 | `plan_by_goal.py` | 377 | 按容量目标起草 `plan.json` | 无 |
 | `git_audit.py` | 356 | 只读 Git 风险审计 | 无 |
 | `e2e_check.py` | 220 | 全链路验收（临时目录内） | 仅自建文件 |
-| `recycle_selfcheck.py` | 188 | 证明本机能回收并还原 | 仅临时探针 |
+| `recycle_selfcheck.py` | 189 | 证明本机能回收并还原 | 仅临时探针 |
 | `recycle_audit.py` | 180 | 只读审计回收站与日志交叉核对 | 无 |
-| 其余 12 个 | 66–149 | 证据采集、对比、5 个 `*_experimental.py` 研究原型 | 见 `recycle-research.md` |
+| 其余 12 个 | 33–149 | 证据采集、对比、5 个 `*_experimental.py` 研究原型 | 见 `recycle-research.md` |
 
 > `*_experimental.py` 是历史研究原型，**未接入执行器，不得用于用户文件**，但仍被 `test_recycle_live.py` 覆盖。保留是因为它们记录了技术探索过程。
 
@@ -290,7 +292,7 @@ AMD 驱动不停写 dump 日志，**每 304 字节产生一条 USN 记录**，�
     "met": true
   },
   "targets": [{
-    "path": "C:\\Users\\me\\AppData\\Local\\Temp\\build-cache",
+    "path": "C:\\Users\\me\\AppData\\Local\\Temp\\build-cache\\obj.bin",
     "action": "trash",
     "risk": "safe",
     "reason": "构建缓存，mtime 45 天，无进程占用，可重建",
@@ -360,7 +362,7 @@ AMD 驱动不停写 dump 日志，**每 304 字节产生一条 USN 记录**，�
 
 | 项 | 值 |
 |---|---|
-| Python | 3.13（CI 测 3.10 + 3.12） |
+| Python | 3.12（本机；CI 测 3.10 + 3.12） |
 | 管理员 | **否**（`usn.py` 需要提权；托管 runner 默认是管理员） |
 | 依赖 | 纯标准库，**不需要 pywin32** |
 | 网络 | `github.com:443` 双向不通（见 §7.1） |
@@ -398,7 +400,7 @@ python disk-cleanup/scripts/recycle_selfcheck.py --drive C:
 python disk-cleanup/scripts/e2e_check.py --drive C:
 
 # 测试
-python -m unittest discover -s disk-cleanup/tests          # 423 通过
+python -m unittest discover -s disk-cleanup/tests          # 424 通过
 DISK_CLEANUP_E2E=1 python -m unittest disk-cleanup.tests.test_e2e -v
 ```
 
@@ -481,7 +483,7 @@ git -C disk-cleanup-src format-patch --binary f7422a6..HEAD --stdout > "0003-NNN
 ```powershell
 cd Z:\磁盘清理-skill\00-交付物\disk-cleanup-src
 python -m unittest discover -s disk-cleanup/tests
-# Ran 423 tests, OK (skipped=18)
+# Ran 424 tests, OK (skipped=18)
 ```
 
 18 个跳过项分类：
@@ -518,7 +520,7 @@ python -m unittest discover -s disk-cleanup/tests
 |---|---|---|---|
 | 1 | **USN 聚合逻辑真机复验** | 根判据与路径拼接已被用户的实机运行验证（跑出绝对路径）；**聚合**（合并同路径、改名配对）只过了单测 | 需一次提权 `since` |
 | 2 | **发布卫生** | **0 个 tag、无 CHANGELOG、README 未声明支持的 Windows 版本**。仓库是公开的，每个访客看到的都是无版本的一坨 | 接手者，约半小时 |
-| 3 | **`SKILL.md` 瘦身** | 10,697 字符。竞品研究把"提示预算 5.4KB 全场最低"列为差异化优势，现在翻了一倍。提示预算按会话次数相乘——**这是全项目唯一"越写越亏"的文件** | 接手者 |
+| 3 | **`SKILL.md` 瘦身** | 10,552 字符。竞品研究把"提示预算 5.4KB 全场最低"列为差异化优势，现在翻了一倍。提示预算按会话次数相乘——**这是全项目唯一"越写越亏"的文件** | 接手者 |
 | 4 | **Docker 注册表条目定论** | 唯一的 `pending`。需一台装有 Docker Desktop 的机器做只读测量 | 需用户资源 |
 | 5 | **回收站目录写权限被改** | 明确**不覆盖**（见下） | 保持开放 |
 | 6 | **"真正释放"（清空回收站）** | 明确**不做**（见下） | 保持开放 |

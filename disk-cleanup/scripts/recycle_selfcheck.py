@@ -171,7 +171,8 @@ def render(report):
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description='Prove that this machine recycles and restores, using a throwaway probe.')
-    parser.add_argument('--drive', help='volume to test, e.g. Z: (default: the %TEMP% volume)')
+    parser.add_argument('--drive',
+                        help='volume to test, e.g. Z: (default: the TEMP volume)')
     parser.add_argument('--format', choices=('text', 'json'), default='text')
     parser.add_argument('--keep-evidence', action='store_true',
                         help='keep the probe directory when the check fails')
