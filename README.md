@@ -253,6 +253,7 @@ python -m unittest disk-cleanup.tests.test_e2e -v
 
 ## 目录与维护
 
+- [交接文档](HANDOVER.md)：给接手者的完整上下文——设计纪律、踩过的坑、未决事项、GitHub 同步流程。
 - [核心技能](disk-cleanup/SKILL.md)：触发条件、一次授权、计划格式、执行边界与结果报告。
 - [计划格式](disk-cleanup/references/plan-schema.md)：`plan.json` 全部字段、门禁规则、退出码与路径保护规则。
 - `disk-cleanup/references/`：按场景加载的 Windows、分类和开发工具指南，附官方资料。
