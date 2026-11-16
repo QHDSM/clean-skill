@@ -300,4 +300,3 @@ python -m unittest disk-cleanup.tests.test_e2e -v
 ## 许可证
 
 [MIT](LICENSE)，Copyright (c) 2026 QHDSM。
-
