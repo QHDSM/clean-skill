@@ -35,6 +35,8 @@ Safety model (enforced here, not in prose):
      so restore never has to guess or invoke a localized Shell verb.
 """
 import argparse
+import ctypes
+import ctypes.wintypes
 import hashlib
 import json
 import os
@@ -50,6 +52,7 @@ import scan  # reuse check_path / unsafe / fingerprint; read-only helpers only
 import git_discovery
 import locks
 import recycle_backend
+import recycle_bin
 import tree_evidence
 import windows_identity
 import windows_parents
@@ -90,6 +93,47 @@ class GateError(Exception):
 def die(code, message):
     print(json.dumps({'ok': False, 'error': message}, ensure_ascii=False), file=sys.stderr)
     return code
+
+
+# ------------------------------------------------------------------- run lock
+
+# Only one execution may move objects at a time: two runs interleaving would
+# both see the same object as present, both reserve its bytes, and the second
+# would report a move that the first already made. Dry-runs do not take it.
+_MUTEX_NAME = 'Local\\disk-cleanup-execution'
+_WAIT_OBJECT_0 = 0
+_WAIT_ABANDONED = 0x80
+_lock_handle = None
+
+
+def acquire_execution_lock():
+    """Take the per-user run lock. Returns (ok, reason); never raises."""
+    global _lock_handle
+    if _lock_handle is not None:
+        return False, 'another cleanup run is in progress in this process'
+    if os.name != 'nt':
+        return True, ''  # the executor itself is Windows-only
+    kernel32 = ctypes.windll.kernel32
+    kernel32.CreateMutexW.restype = ctypes.wintypes.HANDLE
+    handle = kernel32.CreateMutexW(None, False, _MUTEX_NAME)
+    if not handle:
+        return False, 'cannot create the run mutex (error %d)' % ctypes.get_last_error()
+    waited = kernel32.WaitForSingleObject(handle, 0)
+    if waited not in (_WAIT_OBJECT_0, _WAIT_ABANDONED):
+        kernel32.CloseHandle(handle)
+        return False, 'another cleanup run is in progress; wait for it to finish'
+    _lock_handle = handle
+    return True, ''
+
+
+def release_execution_lock():
+    global _lock_handle
+    if _lock_handle is None:
+        return
+    kernel32 = ctypes.windll.kernel32
+    kernel32.ReleaseMutex(_lock_handle)
+    kernel32.CloseHandle(_lock_handle)
+    _lock_handle = None
 
 
 # --------------------------------------------------------------------------- gate
@@ -146,6 +190,7 @@ def load_plan_with_digest(path):
     if len(targets) > BATCH_LIMIT:
         raise GateError(f'targets exceed the batch limit of {BATCH_LIMIT}')
 
+    claimed = {}
     for index, target in enumerate(targets):
         where = f'targets[{index}]'
         if not isinstance(target, dict):
@@ -206,6 +251,11 @@ def load_plan_with_digest(path):
         if any(scan.within(path_value, root) or scan.within(root, path_value)
                for root in excluded):
             raise GateError(f'{where}.path overlaps an excluded root: {path_value}')
+        key = scan.normalized(path_value)
+        if key in claimed:
+            raise GateError(
+                f'{where}.path repeats an earlier target ({claimed[key]}): {path_value}')
+        claimed[key] = where
 
         git = evidence.get('git')
         if git is not None:
@@ -222,7 +272,25 @@ def load_plan_with_digest(path):
                         f'{where} records unverified Git evidence {verdict!r} and '
                         'authorization.git_acknowledged is not true')
 
+    _reject_overlapping_targets(claimed)
     return plan, hashlib.sha256(raw).hexdigest()
+
+
+def _reject_overlapping_targets(claimed):
+    """A target inside another target cannot be verified once the parent moves.
+
+    Trashing a directory takes its children with it, so a plan that lists both
+    would move the child twice, budget it twice, and then report the second move
+    against a path that no longer exists. Rejecting the plan keeps the report
+    honest and the capacity budget exact.
+    """
+    for path, where in sorted(claimed.items()):
+        parts = path.split(os.sep)
+        for depth in range(2, len(parts)):
+            parent = os.sep.join(parts[:depth])
+            if parent in claimed:
+                raise GateError(
+                    f'{where}.path is inside another target ({claimed[parent]}): {path}')
 
 
 def load_plan(path):
@@ -500,6 +568,41 @@ def _recover_attempted(record, done):
     return item
 
 
+def _verify_restored(record, path):
+    """Check that the object at `path` is the one the run moved.
+
+    A restore by rename keeps the file identity, and the journal recorded it
+    while the object was still in place, so "the path is back" can be checked
+    instead of assumed. Anything that cannot be re-read stays honest: the
+    answer is None with the reason, never a guess.
+    """
+    expected = record.get('identity_before') or None
+    expected_size = record.get('size_bytes')
+    if not (isinstance(expected, dict) and expected.get('file_id')):
+        return {'verified': None,
+                'verification': 'the run recorded no file identity for this object'}
+    try:
+        actual = recycle_backend.identity_of(path)
+    except (OSError, ValueError, recycle_backend.BackendUnavailable) as exc:
+        return {'verified': None, 'verification': f'cannot re-read the restored object: {exc}'}
+    same = (actual.get('volume_serial') == expected.get('volume_serial')
+            and str(actual.get('file_id', '')).lower() == str(expected['file_id']).lower())
+    if not same:
+        return {'verified': False,
+                'verification': 'the restored object is not the one the run trashed '
+                                '(file identity differs)'}
+    if expected_size is not None:
+        try:
+            info = os.lstat(path)
+        except OSError as exc:
+            return {'verified': None, 'verification': f'cannot stat the restored object: {exc}'}
+        if not stat.S_ISDIR(info.st_mode) and info.st_size != expected_size:
+            return {'verified': False,
+                    'verification': f'its size changed while it was in the Recycle Bin '
+                                    f'({expected_size} -> {info.st_size} bytes)'}
+    return {'verified': True, 'verification': 'the file identity matches the recorded object'}
+
+
 def undo_run(args):
     """Restore the objects a previous run trashed, using only the audit log.
 
@@ -560,6 +663,8 @@ def undo_run(args):
                     detail=outcome['detail'],
                     restored_to=outcome.get('restored_to'),
                     index_removed=outcome.get('i_removed'))
+        if outcome['ok']:
+            item.update(_verify_restored(record, item['path']))
         results.append(item)
 
     restored = [r for r in results if r['result'] == 'restored']
@@ -580,6 +685,8 @@ def undo_run(args):
             'not_executed': 0,
             'failed': len([r for r in results if r['result'] == 'failed']),
             'recovered': len([r for r in results if r.get('recovered')]),
+            'verified': len([r for r in restored if r.get('verified') is True]),
+            'unverified': len([r for r in restored if r.get('verified') is not True]),
             'moved_bytes': 0,
         },
         'volumes': [],
@@ -589,6 +696,59 @@ def undo_run(args):
 
 
 # ---------------------------------------------------------------------------- main
+
+def bin_budget(drive, profiles, budgets):
+    """Per-volume Recycle Bin budget, resolved once per run.
+
+    Capacity is enforced per volume and counts what the bin already holds, so a
+    batch can overflow a bin that would accept each object on its own. The
+    numbers are only trusted when the whole bin could be read: an unreadable
+    bin (another user's SID, or a locked entry) makes the headroom unknown, and
+    unknown is reported as such instead of being treated as zero.
+    """
+    if drive in budgets:
+        return budgets[drive]
+    try:
+        profile = profiles.get(drive)
+        if profile is None:
+            profile = profiles[drive] = recycle_backend.volume_profile(drive)
+        capacity_mb = profile.get('max_capacity_mb')
+        capacity = capacity_mb * 1024 * 1024 if isinstance(capacity_mb, int) else None
+        try:
+            usage = recycle_bin.bin_usage(drive)
+        except (OSError, ValueError) as exc:
+            usage = {'bytes': None, 'complete': False, 'issues': [str(exc)], 'entries': 0}
+    except recycle_backend.BackendUnavailable as exc:
+        budgets[drive] = {'drive': drive, 'capacity_bytes': None, 'used_bytes': None,
+                          'reserved_bytes': 0, 'complete': False,
+                          'issues': [str(exc)], 'entries': 0}
+        return budgets[drive]
+    budgets[drive] = {
+        'drive': drive,
+        'capacity_bytes': capacity,
+        'used_bytes': usage['bytes'] if usage['complete'] else None,
+        'reserved_bytes': 0,
+        'complete': bool(usage['complete']),
+        'issues': list(usage.get('issues') or []),
+        'entries': usage.get('entries'),
+    }
+    return budgets[drive]
+
+
+def _budget_fit(budget, size_bytes):
+    """Can this object still be added on top of what the bin already holds?"""
+    capacity, used = budget['capacity_bytes'], budget['used_bytes']
+    if capacity is None:
+        return True, None, 'capacity unknown; the per-object check and the callback still apply'
+    if used is None:
+        return True, None, 'current bin usage unknown; the per-object check and the callback still apply'
+    room = capacity - used - budget['reserved_bytes']
+    if (size_bytes or 0) > room:
+        return False, room, (f'the batch would exceed the Recycle Bin capacity for '
+                            f'{budget["drive"]}: {room} bytes left after earlier targets, '
+                            f'{size_bytes or 0} needed; split the batch or empty the bin')
+    return True, room, None
+
 
 def run(args):
     if getattr(args, 'undo', None) or getattr(args, 'undo_last', False):
@@ -633,7 +793,8 @@ def run(args):
         targets = [{
             'path': str(first), 'action': 'trash', 'risk': risk,
             'reason': args.reason or 'explicit single-path request',
-            'evidence': {'fingerprint': list(scan.fingerprint(st))},
+            'evidence': {'fingerprint': list(scan.fingerprint(st)),
+                         'size_bytes': None if stat.S_ISDIR(st.st_mode) else st.st_size},
         }]
         # Single-path mode still passes the same preflight as plan mode.
         for target in targets:
@@ -647,6 +808,7 @@ def run(args):
     journal = AuditJournal.create(args.plan, digest) if args.go else None
     # Recycle Bin capacity is per volume, so the preview resolves it once.
     profiles = {}
+    budgets = {}
 
     for position, target in enumerate(targets):
         path = target['path']
@@ -721,6 +883,14 @@ def run(args):
                                                   'entries': current_tree['entries']}
 
         entry['size_bytes'] = target['evidence'].get('size_bytes')
+        if entry['size_bytes'] is None:
+            # A target without a recorded size would be budgeted as zero bytes,
+            # letting a single huge file skip the capacity gate entirely.
+            try:
+                info = os.lstat(path)
+                entry['size_bytes'] = None if stat.S_ISDIR(info.st_mode) else info.st_size
+            except OSError:
+                entry['size_bytes'] = None
         entry['fingerprint'] = target['evidence']['fingerprint']
 
         # An object that something else holds open cannot be recycles; asking the
@@ -759,12 +929,23 @@ def run(args):
                 if profile is None:
                     profile = profiles[drive] = recycle_backend.volume_profile(drive)
                 fits, why = recycle_backend.fits_capacity(profile, entry.get('size_bytes') or 0)
+                budget = bin_budget(drive, profiles, budgets)
+                batch_fits, room, batch_why = _budget_fit(budget, entry.get('size_bytes'))
+                if fits and not batch_fits:
+                    fits, why = False, batch_why
                 entry['bin_fit'] = {
                     'fits': fits, 'reason': why,
                     'max_capacity_mb': profile.get('max_capacity_mb'),
                     'verified_capable': profile.get('verified_capable'),
                     'issues': profile.get('issues', []),
+                    'batch_fits': batch_fits,
+                    'room_bytes': room,
+                    'bin_used_bytes': budget['used_bytes'],
+                    'bin_usage_complete': budget['complete'],
+                    'bin_usage_issues': budget['issues'],
                 }
+                if fits:
+                    budget['reserved_bytes'] += entry.get('size_bytes') or 0
             except recycle_backend.BackendUnavailable as exc:
                 entry['bin_fit'] = {'fits': None, 'reason': str(exc),
                                     'max_capacity_mb': None,
@@ -774,6 +955,19 @@ def run(args):
             continue
 
         key = os.path.splitdrive(os.path.abspath(path))[0].upper()
+        budget = bin_budget(key, profiles, budgets)
+        batch_fits, room, batch_why = _budget_fit(budget, entry.get('size_bytes'))
+        if not batch_fits:
+            entry['bin_fit'] = {'fits': False, 'reason': batch_why, 'batch_fits': False,
+                                'room_bytes': room,
+                                'bin_used_bytes': budget['used_bytes'],
+                                'bin_usage_complete': budget['complete'],
+                                'bin_usage_issues': budget['issues']}
+            entry.update(result='refused', detail=batch_why)
+            refused.append(entry)
+            results.append(entry)
+            continue
+        budget['reserved_bytes'] += entry.get('size_bytes') or 0
         if key not in before:
             before[key] = volume_free(path)
         if journal is not None:
@@ -804,6 +998,7 @@ def run(args):
                     'path': path, 'action': target['action'], 'risk': target['risk'],
                     'result': 'trashed', 'detail': outcome['detail'],
                     'size_bytes': entry.get('size_bytes'),
+                    'identity_before': outcome.get('identity_before'),
                     'recycle_bin': outcome.get('recycle_bin'),
                     'proof': outcome.get('proof'),
             }):
@@ -869,6 +1064,7 @@ def run(args):
         },
         'volumes': [{'drive': d, 'free_before': before[d], 'free_after': after.get(d)}
                     for d in sorted(before)],
+        'capacity': [budgets[d] for d in sorted(budgets)],
         'recycle_bin_note': (
             'Moved items sit in the Recycle Bin. Space is NOT reclaimed until it is '
             'emptied; the volume figures above may show no change.' if trashed else None),
@@ -894,6 +1090,9 @@ def render(report):
         'total %d | %s %d | dry-run %d | skipped %d | refused %d | failed %d'
         % (summary['total'], verb, summary['trashed'], summary['dry_run'],
            summary['skipped'], summary['refused'], summary['failed']))
+    if report['mode'] == 'UNDO' and summary.get('trashed'):
+        lines.append('  restores verified against the recorded file identity: %d/%d'
+                     % (summary.get('verified', 0), summary['trashed']))
     if summary.get('capacity_warnings'):
         lines.append('  WARNING: %d target(s) exceed the Recycle Bin capacity; --go would '
                      'refuse them. Split or shrink the batch.' % summary['capacity_warnings'])
@@ -923,6 +1122,8 @@ def render(report):
         elif fit and fit.get('verified_capable') is False:
             lines.append('             ↳ Volume not proven recycle-capable: %s'
                          % '; '.join(fit.get('issues') or ['unknown']))
+        if item.get('verified') is False:
+            lines.append('             RESTORED BUT NOT THE SAME OBJECT: ' + item['verification'])
         if item.get('detail') and item['result'] != 'dry_run':
             lines.append('             ↳ %s' % item['detail'])
     if report['volumes']:
@@ -933,6 +1134,18 @@ def render(report):
             else:
                 lines.append('  %s free: %s -> %s'
                              % (vol['drive'], vol['free_before'], vol['free_after']))
+    for budget in report.get('capacity') or []:
+        if budget['capacity_bytes'] is None:
+            lines.append('  %s Recycle Bin capacity: unknown' % budget['drive'])
+        elif budget['used_bytes'] is None:
+            lines.append('  %s Recycle Bin: capacity %d MiB, current usage unknown (%s)'
+                         % (budget['drive'], budget['capacity_bytes'] // (1024 * 1024),
+                            '; '.join(budget['issues']) or 'unreadable'))
+        else:
+            lines.append('  %s Recycle Bin: %d MiB of %d MiB used, %d MiB left for this batch'
+                         % (budget['drive'], budget['used_bytes'] // (1024 * 1024),
+                            budget['capacity_bytes'] // (1024 * 1024),
+                            (budget['capacity_bytes'] - budget['used_bytes']) // (1024 * 1024)))
     if report['recycle_bin_note']:
         lines.append('')
         lines.append('note: ' + report['recycle_bin_note'])
@@ -961,10 +1174,18 @@ def main(argv=None):
     parser.add_argument('--json', action='store_true', help='machine-readable output')
     args = parser.parse_args(argv)
 
+    needs_lock = bool(args.go or args.undo or args.undo_last)
+    if needs_lock:
+        locked, reason = acquire_execution_lock()
+        if not locked:
+            return die(2, reason)
     try:
         report = run(args)
     except GateError as exc:
         return die(2, str(exc))
+    finally:
+        if needs_lock:
+            release_execution_lock()
 
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))

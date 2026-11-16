@@ -219,6 +219,12 @@ class ScanTests(unittest.TestCase):
         self.assertEqual(observation['distinct_file_ids'], 3)
         self.assertEqual(observation['repeated_hardlink_paths'], 1)
         self.assertIsNone(observation['reclaimable_bytes'])
+        # The report may state an upper bound, never a reclaimable figure.
+        self.assertEqual(result['allocated_bytes'], expected)
+        self.assertTrue(observation['upper_bound_of_reclaimable_bytes'])
+        text = scan.render(result)
+        self.assertIn('Allocated bytes (distinct file IDs):', text)
+        self.assertIn('Reclaimable bytes: unknown', text)
 
     @unittest.skipUnless(os.name == 'nt', 'Windows allocation metadata test')
     def test_allocation_failure_reports_incomplete_observation(self):
@@ -228,12 +234,134 @@ class ScanTests(unittest.TestCase):
         self.assertFalse(result['allocation_observation']['complete'])
         self.assertGreater(result['error_count'], 0)
         self.assertEqual(result['files'], 3)
+        # A partial observation must not be promoted to a number.
+        self.assertIsNone(result['allocated_bytes'])
 
     def test_default_scan_does_not_query_native_allocation(self):
         import windows_identity
         with patch.object(windows_identity, 'capture', side_effect=AssertionError('unexpected query')):
             result = self.run_scan()
         self.assertIsNone(result['allocation_observation'])
+        self.assertIsNone(result['allocated_bytes'])
+        self.assertIn('Allocated/reclaimable bytes: unknown', scan.render(result))
+
+
+@unittest.skipUnless(os.name == 'nt', 'NTFS alternate data streams are Windows-only')
+class StreamTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        (self.root / 'plain.txt').write_bytes(b'visible')
+        self.carrier = self.root / 'carrier.txt'
+        self.carrier.write_bytes(b'small')
+        for stream, payload in (((':hidden', 'secret payload'), (':Zone.Identifier', 'zone'))):
+            made = subprocess.run(['cmd', '/c', 'echo', payload, '>', str(self.carrier) + stream],
+                                  capture_output=True)
+            if made.returncode != 0:
+                self.skipTest('this volume has no alternate data stream support')
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_named_streams_are_counted_outside_the_totals(self):
+        result = scan.Scanner([str(self.root)], progress=False, streams=True).run()
+        streams = result['alternate_streams']
+        self.assertEqual(streams['files_with_streams'], 1)
+        self.assertGreater(streams['alternate_bytes'], 0)
+        self.assertEqual(len(streams['samples']), 1)
+        names = [item['name'] for item in streams['samples'][0]['streams']]
+        self.assertIn(':hidden:$DATA', names)
+        self.assertEqual(result['logical_bytes'], len(b'visible') + len(b'small'))
+        self.assertIn('Alternate data streams: 1 file(s)', scan.render(result))
+        self.assertIn('outside logical/allocated totals', scan.render(result))
+
+    def test_streams_stay_off_without_the_flag(self):
+        result = scan.Scanner([str(self.root)], progress=False).run()
+        self.assertIsNone(result['alternate_streams'])
+        self.assertNotIn('Alternate data streams:', scan.render(result))
+
+
+class ConcurrentChangeTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.watched = self.root / 'busy'
+        self.watched.mkdir()
+        (self.watched / 'member.bin').write_bytes(b'x' * 16)
+        (self.root / 'quiet').mkdir()
+        (self.root / 'quiet' / 'member.bin').write_bytes(b'y' * 8)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    class _Stat:
+        def __init__(self, real, mtime_ns):
+            self.st_mode = real.st_mode
+            self.st_dev = real.st_dev
+            self.st_ino = real.st_ino
+            self.st_size = real.st_size
+            self.st_mtime_ns = mtime_ns
+            self.st_ctime_ns = real.st_ctime_ns
+            self.st_file_attributes = getattr(real, 'st_file_attributes', 0)
+
+    class _Drained:
+        def __init__(self, inner, on_exhausted):
+            self.inner, self.on_exhausted = inner, on_exhausted
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            try:
+                return next(self.inner)
+            except StopIteration:
+                self.on_exhausted()
+                raise
+
+        def close(self):
+            self.inner.close()
+
+    def _move_after_walking(self, watched, offset_ns=10_000_000):
+        """Simulate a directory gaining or losing a member after it has been read.
+
+        The scanner lstats a child once in its parent's loop, again when entering
+        it, and a third time after walking it. Only that last call may see the new
+        timestamp, so the move is keyed on scandir exhaustion, not on call count.
+        """
+        state = {'walked': False}
+        key = os.path.normcase(str(watched))
+        real_lstat, real_scandir = os.lstat, os.scandir
+
+        def lstat(path):
+            info = real_lstat(path)
+            if state['walked'] and os.path.normcase(str(path)) == key:
+                return self._Stat(info, info.st_mtime_ns + offset_ns)
+            return info
+
+        def scandir(path):
+            inner = real_scandir(path)
+            if os.path.normcase(str(path)) != key:
+                return inner
+            return self._Drained(inner, lambda: state.update(walked=True))
+
+        return lstat, scandir
+
+    def test_a_directory_that_changes_mid_scan_is_reported(self):
+        lstat, scandir = self._move_after_walking(self.watched)
+        with patch.object(os, 'lstat', side_effect=lstat), \
+                patch.object(os, 'scandir', side_effect=scandir):
+            result = scan.Scanner([str(self.root)], progress=False).run()
+        change = result['concurrent_change']
+        self.assertEqual(change['directories_changed'], 1)
+        self.assertEqual(len(change['samples']), 1)
+        self.assertIn('busy', change['samples'][0]['path'])
+        self.assertIn('Directories that changed while being scanned: 1', scan.render(result))
+        self.assertTrue(any('changed while being scanned' in note for note in result['notes']))
+
+    def test_a_quiet_tree_reports_no_change(self):
+        result = scan.Scanner([str(self.root)], progress=False).run()
+        self.assertEqual(result['concurrent_change']['directories_changed'], 0)
+        self.assertNotIn('Directories that changed', scan.render(result))
 
 
 if __name__ == '__main__':

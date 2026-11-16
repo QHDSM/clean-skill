@@ -292,6 +292,26 @@ def entries_for_volume(drive):
     return _collect(drive)
 
 
+
+def bin_usage(drive):
+    """How much of this volume's Recycle Bin is already spent.
+
+    The Recycle Bin budget is per volume and shared with everything already in
+    it, so a batch check has to start from this number instead of assuming an
+    empty bin. Only usable when the whole bin could be read: 'complete' False
+    means the total is unknown, and callers must not treat unknown as zero.
+    Directory payloads contribute the size recorded in their $I metadata; that
+    is what the bin accounts for them, not the sum of their descendants.
+    """
+    collected = _collect(drive)
+    total = sum(entry.get('size_bytes') or 0 for entry in collected['entries'])
+    return {'drive': (drive or '').rstrip('\\/').upper(),
+            'root': collected['root'],
+            'bytes': total,
+            'entries': len(collected['entries']),
+            'complete': collected['complete'],
+            'issues': list(collected['issues'])}
+
 def find_entry(drive, original_path, deleted_unix=None, tolerance=120):
     """Return the best entry for a path, or None when none matches.
 

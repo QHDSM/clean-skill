@@ -172,9 +172,9 @@ class FakeBinCase(unittest.TestCase):
         self.sid2.mkdir(parents=True)
 
     def add_pair(self, directory, suffix, original_path, *, deleted_unix=1_700_000_000.0,
-                 content=b'payload', make_r=True):
+                 content=b'payload', make_r=True, size_bytes=1234):
         (directory / f'$I{suffix}').write_bytes(
-            build_v2(original_path, deleted_unix=deleted_unix))
+            build_v2(original_path, size_bytes=size_bytes, deleted_unix=deleted_unix))
         if make_r:
             (directory / f'$R{suffix}').write_bytes(content)
         return directory / f'$I{suffix}'
@@ -183,6 +183,35 @@ class FakeBinCase(unittest.TestCase):
         with mock.patch.object(recycle_bin, 'recycle_root', return_value=str(self.fake)):
             return recycle_bin.entries_for_volume(drive)
 
+
+
+class BinUsageTests(FakeBinCase):
+    def test_sums_what_the_bin_already_holds(self):
+        self.add_pair(self.sid1, 'AAA', r'C:\Temp\a.bin', content=b'x' * 100, size_bytes=100)
+        self.add_pair(self.sid2, 'BBB', r'C:\Temp\b.bin', content=b'y' * 40, size_bytes=40)
+        with mock.patch.object(recycle_bin, 'recycle_root', return_value=str(self.fake)):
+            usage = recycle_bin.bin_usage('Z:')
+        self.assertEqual(usage['drive'], 'Z:')
+        self.assertEqual(usage['entries'], 2)
+        self.assertEqual(usage['bytes'], 140)
+        self.assertTrue(usage['complete'])
+        self.assertEqual(usage['issues'], [])
+
+    def test_an_unreadable_sid_makes_the_total_unknown(self):
+        self.add_pair(self.sid1, 'AAA', r'C:\Temp\a.bin', content=b'x' * 100, size_bytes=100)
+        real_listdir = recycle_bin._directory_entries
+
+        def listing(path):
+            if str(path).endswith(self.sid2.name):
+                raise PermissionError('denied')
+            return real_listdir(path)
+
+        with mock.patch.object(recycle_bin, 'recycle_root', return_value=str(self.fake)):
+            with mock.patch.object(recycle_bin, '_directory_entries', side_effect=listing):
+                usage = recycle_bin.bin_usage('Z:')
+        self.assertFalse(usage['complete'])
+        self.assertEqual(usage['bytes'], 100)
+        self.assertTrue(any('permission denied' in issue for issue in usage['issues']))
 
 class RecycleRootTests(unittest.TestCase):
     def test_accepts_drive_forms(self):

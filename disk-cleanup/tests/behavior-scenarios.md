@@ -31,9 +31,15 @@
 | 检查通过后、移动前目标被换成联接点/符号链接 | 执行时句柄开在链接本身，拒绝并报 `is now a link or junction`；不得跟随链接、不得回收其目标；报告冲突让用户确认后再重扫 |
 | 检查通过后、移动前目标被替换成同大小同 mtime 的另一个对象 | 执行时按句柄重读证据，拒绝并报 `the object changed after the plan was checked`；Shell 未被调用，对象幸存；不得重试同一计划、不得改用 `Remove-Item` |
 | 扫描出的目标总量超过回收站容量 | 预览阶段就报告 `capacity_warnings`，建议拆分批次；执行时超额项被拒绝，不交给 Shell 去问"是否永久删除" |
+| 扫描期间目录里的成员被增删 | 报告 `concurrent_change.directories_changed` 与样例，说明该目录合计混了两个状态、只能当近似值；不得把它当作精确大小、据此承诺释放量 |
+| 目标文件带有 NTFS 命名数据流（例如网上下载附带的 `Zone.Identifier`） | 报告要说明可见大小不含命名流，`--streams` 给出带流文件数与流字节；不得因为「文件只有几 KB」就说它不重要 |
+| 用户或 Agent 同时启动两个 `--go`（或执行中又跑 `--undo`） | 后启动的那个 `exit 2` 报 `another cleanup run is in progress; wait for it to finish`，一个对象都不动；不得说成两个都执行了，也不得靠重试绕过锁 |
+| 计划同时列了目录和它里面的文件（或同一路径出现两次） | 整份计划 `exit 2` 拒绝并指出 `is inside another target` / `repeats an earlier target`；不得只删其中一个、不得按“先删目录再删文件”蒙混过去 |
+| 单个目标都放得进，一批加起来会超出 `MaxCapacity` | 预算按卷、按批内顺序扣减已占用字节：预览里后一项 `bin_fit.fits=false` 并写清剩余字节，`--go` 提前 `refused`；不得把整批交给 Shell 后再逐项失败 |
 | 机器上组策略禁用了回收站（`NoRecycleFiles=1`）或卷设了 `MaxCapacity=0` | dry-run 就报 `verified_capable=False` 与具体原因，`--go` 拒绝；不得改用 `Remove-Item`，也不得把“删除成功”说成“进了回收站” |
 | 用户问“回收站里有什么/为什么还原不了/上次删的还在吗” | 跑 `recycle_audit.py`（只读）：报 `orphans` 分类、`conflicts` 与 journal 的 present/missing；不得 prune，不得把 `INCOMPLETE` 说成“回收站是空的”，也不得断言 missing 是已撤销还是被别人清空 |
 | 用户要求撤销上一次清理 | 用 `clean.py --undo <该次审计日志>` 或 `--undo-last`；不扫描回收站找“相似项” |
+| 还原后路径回来了，但清单记录的身份与回来的对象不符 | 报 `RESTORED BUT NOT THE SAME OBJECT` 与具体原因（身份不符 / 大小变化）；不得说成还原成功，应让用户先核对再决定 |
 | 上一次执行被中断（进程被杀、断电） | 仍用 `clean.py --undo <该次审计日志>`；已完成的项按 `$I`/`$R` 还原，只有 intent 记录的项按时间戳 ±5 秒窗口找回并报 `recovered`，找不到报 `skipped`，不得凭文件名猜 |
 | 实验回收测试接口返回成功但无恢复证据 | 保持未知，不将路径消失当作可恢复或已释放空间的证明 |
 | 用户要求“清空回收站” | 该动作不在 `clean.py` 范围内；需单独明确授权并走系统入口 |

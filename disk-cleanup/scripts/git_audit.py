@@ -22,6 +22,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 
 GIT_TIMEOUT = 30
 
@@ -42,11 +43,57 @@ def run_git(repo: str, args: list[str]) -> tuple[int, str, str]:
 
 
 def discover(start: str) -> tuple[str | None, str | None]:
-    """返回 (仓库根, 错误说明)。"""
+    """返回 (仓库根, 错误说明)。裸仓库没有工作树，用 git 目录本身作根。"""
     code, out, err = run_git(start, ["rev-parse", "--show-toplevel"])
+    if code == 0:
+        return out.strip(), None
+    bare_code, bare_out, _ = run_git(start, ["rev-parse", "--is-bare-repository"])
+    if bare_code == 0 and bare_out.strip() == "true":
+        dir_code, dir_out, _ = run_git(start, ["rev-parse", "--absolute-git-dir"])
+        if dir_code == 0 and dir_out.strip():
+            return dir_out.strip(), None
+    return None, (err.strip() or out.strip() or "not a git repository")
+
+
+def repo_state(repo: str) -> dict:
+    """仓库形态：git 目录、当前分支、是否 detached、是否裸仓库。"""
+    state = {"error": None, "git_dir": None, "branch": None,
+             "detached": False, "bare": False}
+    code, out, _ = run_git(repo, ["rev-parse", "--absolute-git-dir"])
+    if code == 0:
+        state["git_dir"] = out.strip() or None
+    code, out, _ = run_git(repo, ["rev-parse", "--is-bare-repository"])
+    if code == 0:
+        state["bare"] = out.strip() == "true"
+    code, out, err = run_git(repo, ["symbolic-ref", "-q", "--short", "HEAD"])
+    if code == 0:
+        state["branch"] = out.strip() or None
+    elif code == 1:
+        state["detached"] = True
+    else:
+        state["error"] = err.strip() or "symbolic-ref failed"
+    return state
+
+
+def coverage_audit(repo: str, has_remotes: bool) -> dict:
+    """统计本地 refs 上、但不在任何 remote-tracking ref 上的提交数。
+
+    这是对"本地历史是否已被远端覆盖"的直接计数，不依赖分支上游配置；
+    remote-tracking ref 本身可能是缓存的，所以它证明的是"与本地记录的远端一致"。
+    """
+    if not has_remotes:
+        return {"error": None, "local_commits_not_on_a_remote": None,
+                "note": "no remotes configured; nothing can be proven covered"}
+    code, out, err = run_git(repo, ["rev-list", "--count", "--branches", "--tags",
+                                    "--not", "--remotes"])
     if code != 0:
-        return None, (err.strip() or out.strip() or "not a git repository")
-    return out.strip(), None
+        return {"error": err.strip() or "rev-list failed",
+                "local_commits_not_on_a_remote": None}
+    try:
+        return {"error": None, "local_commits_not_on_a_remote": int(out.strip())}
+    except ValueError:
+        return {"error": "unparsable rev-list count: %r" % out.strip(),
+                "local_commits_not_on_a_remote": None}
 
 
 def porcelain_audit(repo: str) -> dict:
@@ -151,14 +198,21 @@ def audit(path: str) -> dict:
     if repo is None:
         return {"is_git_repo": False, "error": err}
 
-    st = porcelain_audit(repo)
+    state = repo_state(repo)
+    bare = state["bare"]
+    if bare:
+        st = {"error": None, "counts": {}}
+        stashes, stash_err = 0, None
+    else:
+        st = porcelain_audit(repo)
+        stashes, stash_err = stash_count(repo)
     counts = st.get("counts", {})
-    stashes, stash_err = stash_count(repo)
     up = upstream_audit(repo)
     rem = remote_state(repo)
     wt = worktree_state(repo)
+    cover = coverage_audit(repo, bool(rem.get("remotes")))
 
-    risks, unknown = [], []
+    risks, unknown, caveats = [], [], []
 
     if st.get("error"):
         unknown.append("worktree status unknown: %s" % st["error"])
@@ -171,15 +225,17 @@ def audit(path: str) -> dict:
         unknown.append("remote configuration unknown: %s" % rem["error"])
     if wt.get("error"):
         unknown.append("linked worktree status unknown: %s" % wt["error"])
-    code, _, err = run_git(repo, ["symbolic-ref", "-q", "HEAD"])
-    if code == 1:
-        unknown.append("detached HEAD: commit coverage is not established")
-    elif code != 0:
-        unknown.append("HEAD state unknown: %s" % (err.strip() or "symbolic-ref failed"))
-    unknown.append("local tags, reflogs and unreachable commits are not audited")
-    if wt.get("linked_worktrees"):
-        risks.append("%d linked worktree(s); their private state is not covered by this report"
-                     % wt["linked_worktrees"])
+    if state["error"]:
+        unknown.append("HEAD state unknown: %s" % state["error"])
+    if state["detached"]:
+        unknown.append("detached HEAD: the checked-out commit may not be on any branch")
+    if cover.get("error"):
+        unknown.append("commit coverage unknown: %s" % cover["error"])
+    caveats.append("local tags, reflogs and unreachable commits are not audited")
+    if rem.get("remotes"):
+        caveats.append(rem["note"])
+    if bare:
+        risks.append("bare repository: no work tree, its refs and objects exist only here")
 
     modified = counts.get("modified", 0)
     staged = counts.get("staged", 0)
@@ -195,20 +251,30 @@ def audit(path: str) -> dict:
         risks.append("ignored entries are LOCAL-ONLY too; ignore does not mean disposable")
     if stashes:
         risks.append("local stashes are not protected by ordinary push")
+    if wt.get("linked_worktrees"):
+        risks.append("%d linked worktree(s); their private state is not covered by this report"
+                     % wt["linked_worktrees"])
     if not rem.get("remotes") and not rem.get("error"):
         risks.append("no remote configured")
-    elif rem.get("remotes"):
-        unknown.append(rem["note"])
 
     local_only = list(up.get("local_only_refs", []))
     if local_only:
         risks.append("local refs/commits are not proven covered by advertised remotes")
+    not_on_remote = cover.get("local_commits_not_on_a_remote")
+    if not_on_remote:
+        risks.append("%d commit(s) reachable from local refs are not on any remote-tracking ref"
+                     % not_on_remote)
 
-    tracked_history_covered = bool(rem.get("remotes")) and not local_only \
-        and up.get("unpushed_commit_count", 0) == 0 and not unknown
+    tracked_history_covered = (
+        bool(rem.get("remotes"))
+        and cover.get("error") is None
+        and not_on_remote == 0
+        and up.get("error") is None
+        and not state["detached"]
+    )
 
     all_content_synced = (
-        tracked_history_covered
+        tracked_history_covered and not bare
         and modified == 0 and staged == 0 and untracked == 0
         and ignored == 0 and conflicts == 0 and stashes == 0
         and not risks and not unknown
@@ -217,20 +283,29 @@ def audit(path: str) -> dict:
     return {
         "is_git_repo": True,
         "repo_root": repo,
+        "git_dir": state["git_dir"],
+        "branch": state["branch"],
+        "detached": state["detached"],
+        "bare": bare,
+        "remote_verified": False,
+        "checked_unix": int(time.time()),
         "counts": counts,
         "stashes": stashes,
         "remotes": rem.get("remotes", []),
         "branches": up.get("branches", []),
         "unpushed_commit_count": up.get("unpushed_commit_count", 0),
+        "local_commits_not_on_a_remote": not_on_remote,
         "local_only_refs": local_only,
         "linked_worktrees": wt.get("linked_worktrees", 0),
         "risks": risks,
         "unknown": unknown,
+        "caveats": caveats,
         "tracked_history_covered": tracked_history_covered,
         "all_content_synced": all_content_synced,
         "needs_confirmation": not all_content_synced,
         "verdict": ("SAFE_TO_CONSIDER" if all_content_synced
                     else "LOCAL_ONLY_DATA_PRESENT" if local_only or up.get("unpushed_commit_count", 0)
+                    or not_on_remote
                     else "LOCAL_MODIFICATIONS" if (modified or staged or conflicts)
                     else "UNVERIFIED"),
     }
@@ -255,6 +330,11 @@ def main() -> int:
         else:
             print("verdict: %s" % result.get("verdict"))
             print("repo:    %s" % result.get("repo_root"))
+            print("git_dir: %s | branch: %s | bare: %s | detached: %s"
+                  % (result.get("git_dir"), result.get("branch"),
+                     result.get("bare"), result.get("detached")))
+            print("commits not on a remote-tracking ref: %s"
+                  % result.get("local_commits_not_on_a_remote"))
             for k, v in (result.get("counts") or {}).items():
                 print("  %-10s %s" % (k, v))
             print("  stashes    %s" % result.get("stashes"))
@@ -262,6 +342,8 @@ def main() -> int:
                 print("RISK: %s" % r)
             for u in result.get("unknown", []):
                 print("UNKNOWN: %s" % u)
+            for c in result.get("caveats", []):
+                print("CAVEAT: %s" % c)
 
     if not result.get("is_git_repo"):
         return 3

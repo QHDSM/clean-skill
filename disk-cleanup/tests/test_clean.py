@@ -227,6 +227,55 @@ class GateTests(unittest.TestCase):
                                  authorization={'excluded': [str(private)]})
         self.assert_gate(plan, 'overlaps an excluded root')
 
+    def test_rejects_the_same_target_twice(self):
+        target = self.factory.target(self.victim)
+        duplicate = json.loads(json.dumps(target))
+        plan = self.factory.plan([target, duplicate])
+        self.assert_gate(plan, 'repeats an earlier target')
+
+    def test_rejects_a_target_inside_another_target(self):
+        inner = self.victim / 'inner'
+        inner.mkdir()
+        plan = self.factory.plan([self.factory.target(self.victim),
+                                  self.factory.target(inner)])
+        self.assert_gate(plan, 'is inside another target')
+
+    def test_allows_sibling_directories(self):
+        first = self.root / 'one'
+        second = self.root / 'one-sibling'
+        first.mkdir()
+        second.mkdir()
+        plan = self.factory.plan([self.factory.target(first),
+                                  self.factory.target(second)])
+        loaded, _digest = clean.load_plan_with_digest(self.write(plan))
+        self.assertEqual(len(loaded['targets']), 2)
+
+    def test_execution_lock_refuses_a_second_holder_and_releases(self):
+        clean.release_execution_lock()
+        self.addCleanup(clean.release_execution_lock)
+        self.assertEqual(clean.acquire_execution_lock(), (True, ''))
+        ok, reason = clean.acquire_execution_lock()
+        self.assertFalse(ok)
+        self.assertIn('another cleanup run is in progress', reason)
+        clean.release_execution_lock()
+        self.assertEqual(clean.acquire_execution_lock(), (True, ''))
+
+    def test_a_locked_run_is_rejected_before_anything_moves(self):
+        plan = self.factory.plan([self.factory.target(self.victim)])
+        path = self.write(plan)
+        with patch.object(clean, 'acquire_execution_lock',
+                          return_value=(False, 'another cleanup run is in progress')):
+            code = clean.main(['--plan', str(path), '--go'])
+        self.assertEqual(code, 2)
+        self.assertTrue(self.victim.exists())
+
+    def test_dry_run_does_not_take_the_lock(self):
+        plan = self.factory.plan([self.factory.target(self.victim)])
+        path = self.write(plan)
+        with patch.object(clean, 'acquire_execution_lock',
+                          side_effect=AssertionError('dry-run must not lock')):
+            self.assertEqual(clean.main(['--plan', str(path)]), 0)
+
     # --- git gate -----------------------------------------------------------
 
     def test_rejects_unacknowledged_git_risk(self):
@@ -416,6 +465,64 @@ class RunTests(unittest.TestCase):
         self.assertEqual(report['summary']['dry_run'], 1)
         self.assertEqual(report['summary']['trashed'], 0)
         self.assertTrue(self.cache.exists())
+
+
+    def budget_plan(self, sizes):
+        targets = []
+        paths = []
+        for index, size in enumerate(sizes):
+            folder = self.root / ('budget-%d' % index)
+            folder.mkdir()
+            (folder / 'blob.bin').write_bytes(b'x' * 16)
+            target = self.factory.target(folder)
+            target['evidence']['size_bytes'] = size
+            targets.append(target)
+            paths.append(folder)
+        return self.factory.plan(targets), paths
+
+    def run_with_budget(self, plan, usage, go=False, capacity_mb=1):
+        profile = {'drive': 'Z:', 'filesystem': 'NTFS', 'verified_capable': True,
+                   'issues': [], 'max_capacity_mb': capacity_mb, 'nuke_on_delete': 0}
+        with patch.object(clean.recycle_backend, 'volume_profile', return_value=profile):
+            with patch.object(clean.recycle_bin, 'bin_usage', return_value=usage):
+                return self.run_plan(plan, go=go)
+
+    def usage(self, used, complete=True):
+        return {'drive': 'Z:', 'root': 'Z:\\$RECYCLE.BIN', 'bytes': used, 'entries': 1,
+                'complete': complete,
+                'issues': [] if complete else ['permission denied for S-1-5-18']}
+
+    def test_execution_refuses_a_target_that_would_overflow_the_bin(self):
+        plan, paths = self.budget_plan([400_000, 400_000])
+        with patch.object(clean.recycle_backend, 'recycle',
+                          side_effect=lambda path, **kwargs: recycled_verdict(path)):
+            report = self.run_with_budget(plan, self.usage(400_000), go=True)
+        results = report['results']
+        self.assertEqual(results[0]['result'], 'trashed')
+        self.assertEqual(results[1]['result'], 'refused')
+        self.assertIn('would exceed the Recycle Bin capacity', results[1]['detail'])
+        self.assertEqual(report['summary']['capacity_warnings'], 1)
+
+    def test_preview_shows_the_same_overflow_before_anything_moves(self):
+        plan, paths = self.budget_plan([400_000, 400_000])
+        report = self.run_with_budget(plan, self.usage(400_000), go=False)
+        first, second = report['results']
+        self.assertIs(first['bin_fit']['fits'], True)
+        self.assertIs(second['bin_fit']['fits'], False)
+        self.assertIn('would exceed', second['bin_fit']['reason'])
+        self.assertEqual(report['summary']['capacity_warnings'], 1)
+        self.assertTrue(all(path.exists() for path in paths))
+        text = clean.render(report)
+        self.assertIn('Recycle Bin: 0 MiB of 1 MiB used', text)
+
+    def test_unknown_usage_is_reported_not_treated_as_empty(self):
+        plan, paths = self.budget_plan([400_000, 400_000])
+        report = self.run_with_budget(plan, self.usage(400_000, complete=False), go=False)
+        first = report['results'][0]
+        self.assertIs(first['bin_fit']['fits'], True)
+        self.assertIs(first['bin_fit']['bin_usage_complete'], False)
+        self.assertIn('current usage unknown', clean.render(report))
+        self.assertEqual(report['summary']['capacity_warnings'], 0)
 
     def test_dry_run_reports_objects_that_cannot_fit_in_the_bin(self):
         target = self.factory.target(self.cache)
@@ -786,6 +893,71 @@ class UndoTests(unittest.TestCase):
                                         undo_last=undo_last)
         return clean.run(args)
 
+
+    def undo_verified(self, rows, identity, size_bytes, content=b'hello'):
+        target = self.root / 'logs'
+        log = self.manifest(rows)
+
+        def restore(parsed):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)
+            return {'ok': True, 'detail': 'restored', 'restored_to': str(target),
+                    'i_removed': True}
+
+        with patch.object(recycle_bin, 'parse_entry', return_value=self.parsed(str(target))):
+            with patch.object(recycle_bin, 'restore', side_effect=restore):
+                with patch.object(clean.recycle_backend, 'identity_of',
+                                  return_value=identity) as lookup:
+                    return self.undo(log), lookup
+
+    def test_undo_verifies_the_restored_object_identity(self):
+        identity = {'volume_serial': 7, 'file_id': 'aa' * 16}
+        rows = [self.record(self.root / 'logs', size_bytes=5, identity_before=identity)]
+        report, lookup = self.undo_verified(rows, identity, 5)
+        item = report['results'][0]
+        self.assertTrue(item['verified'])
+        self.assertIn('matches the recorded object', item['verification'])
+        self.assertEqual(report['summary']['verified'], 1)
+        self.assertEqual(report['summary']['unverified'], 0)
+        self.assertEqual(lookup.call_count, 1)
+        self.assertIn('restores verified against the recorded file identity: 1/1',
+                      clean.render(report))
+
+    def test_undo_marks_a_different_object_as_not_the_one_trashed(self):
+        rows = [self.record(self.root / 'logs', size_bytes=5,
+                            identity_before={'volume_serial': 7, 'file_id': 'aa' * 16})]
+        report, _ = self.undo_verified(rows, {'volume_serial': 7, 'file_id': 'bb' * 16}, 5)
+        item = report['results'][0]
+        self.assertFalse(item['verified'])
+        self.assertIn('not the one the run trashed', item['verification'])
+        self.assertIn('RESTORED BUT NOT THE SAME OBJECT', clean.render(report))
+        self.assertEqual(report['summary']['unverified'], 1)
+
+    def test_undo_detects_a_size_change_while_in_the_bin(self):
+        rows = [self.record(self.root / 'logs', size_bytes=5,
+                            identity_before={'volume_serial': 7, 'file_id': 'aa' * 16})]
+        report, _ = self.undo_verified(rows, {'volume_serial': 7, 'file_id': 'aa' * 16},
+                                       5, content=b'longer than five')
+        item = report['results'][0]
+        self.assertFalse(item['verified'])
+        self.assertIn('size changed while it was in the Recycle Bin', item['verification'])
+
+    def test_old_records_without_an_identity_are_not_upgraded(self):
+        rows = [self.record(self.root / 'logs', size_bytes=5)]
+        with patch.object(recycle_bin, 'parse_entry',
+                          return_value=self.parsed(str(self.root / 'logs'))):
+            with patch.object(recycle_bin, 'restore',
+                              return_value={'ok': True, 'detail': 'restored',
+                                            'restored_to': str(self.root / 'logs'),
+                                            'i_removed': True}):
+                with patch.object(clean.recycle_backend, 'identity_of') as lookup:
+                    report = self.undo(self.manifest(rows))
+        item = report['results'][0]
+        self.assertIsNone(item['verified'])
+        self.assertIn('recorded no file identity', item['verification'])
+        lookup.assert_not_called()
+        self.assertEqual(report['summary']['unverified'], 1)
+
     def test_undo_restores_only_trashed_records(self):
         target = self.root / 'logs'
         log = self.manifest([
@@ -985,6 +1157,33 @@ class SinglePathTests(unittest.TestCase):
         report = clean.run(self.args())
         self.assertEqual(report['summary']['total'], 1)
         self.assertEqual(report['summary']['dry_run'], 1)
+
+    def test_a_file_single_path_target_carries_its_size(self):
+        blob = self.root / 'blob.bin'
+        blob.write_bytes(b'x' * 4096)
+        report = clean.run(self.args(path=str(blob), confirm_path=str(blob)))
+        self.assertEqual(report['results'][0]['size_bytes'], 4096)
+
+    def test_a_file_without_recorded_size_is_still_budgeted(self):
+        blob = self.root / 'big.bin'
+        blob.write_bytes(b'y' * 2048)
+        info = clean.os.lstat(blob)
+        target = {'path': str(blob), 'action': 'trash', 'risk': 'safe',
+                  'reason': 'size fallback',
+                  'evidence': {'fingerprint': list(clean.scan.fingerprint(info))}}
+        plan = {'schema': clean.SCHEMA, 'generated_unix': 1730000000,
+                'authorization': {'scope': [str(self.root)], 'excluded': [],
+                                  'permanent_delete': False},
+                'targets': [target]}
+        path = self.root / 'plan.json'
+        path.write_text(clean.json.dumps(plan), encoding='utf-8')
+        with patch.object(clean, 'preflight', return_value=(True, 'ok')), \
+                patch.object(clean.git_discovery, 'discover',
+                             return_value={'complete': True, 'markers': []}):
+            report = clean.run(clean.argparse.Namespace(
+                plan=str(path), path=None, confirm_path=None, risk='caution',
+                reason=None, go=False))
+        self.assertEqual(report['results'][0]['size_bytes'], 2048)
 
     def test_single_path_refuses_volume_root(self):
         with self.assertRaises(clean.GateError) as ctx:

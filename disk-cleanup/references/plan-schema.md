@@ -108,7 +108,8 @@ Windows 下可运行 `python scripts/windows_identity.py '<绝对路径>'`，将
 8. 每项 `evidence.fingerprint` 必须是 5 个整数。
 9. 每项 `path` 必须落在某个 `scope` 内。
 10. 每项 `path` 不得与任何 `excluded` 重叠（包括目标为排除项的父目录）。
-11. Git 风险闸门（见上）。
+11. 同一份计划里不得重复出现同一个对象（按 `normcase` 后的路径比较，`Z:\A` 与 `z:\a` 算同一个），也不得让一个目标落在另一个目标里面：目录被回收时子孙随之移动，嵌套项无法再被独立核验，预算也会重复计算。违反时报 `repeats an earlier target` 或 `is inside another target`。
+12. Git 风险闸门（见上）。
 
 ## 退出码
 

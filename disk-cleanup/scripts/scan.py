@@ -34,6 +34,49 @@ def unsafe(st):
     return stat.S_ISLNK(st.st_mode) or bool(getattr(st, 'st_file_attributes', 0) & (REPARSE | OFFLINE | RECALL))
 
 
+INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+
+class _WIN32_FIND_STREAM_DATA(ctypes.Structure):
+    _fields_ = [('StreamSize', ctypes.c_longlong),
+                ('cStreamName', ctypes.c_wchar * (260 + 36))]
+
+
+def _kernel32():
+    return ctypes.WinDLL('kernel32', use_last_error=True)
+
+
+def alternate_streams(path):
+    """Return [(name, size)] for NTFS alternate data streams, without the default one.
+
+    A file's visible size can hide gigabytes in a named stream; neither logical
+    bytes nor allocation queries count them. Only NTFS has streams, and this runs
+    one enumeration per file, so it stays behind an explicit flag.
+    """
+    k32 = _kernel32()
+    k32.FindFirstStreamW.restype = ctypes.c_void_p
+    k32.FindFirstStreamW.argtypes = [ctypes.c_wchar_p, ctypes.c_int,
+                                     ctypes.POINTER(_WIN32_FIND_STREAM_DATA), ctypes.c_uint]
+    k32.FindNextStreamW.restype = ctypes.c_bool
+    k32.FindNextStreamW.argtypes = [ctypes.c_void_p, ctypes.POINTER(_WIN32_FIND_STREAM_DATA)]
+    k32.FindClose.argtypes = [ctypes.c_void_p]
+    data = _WIN32_FIND_STREAM_DATA()
+    handle = k32.FindFirstStreamW(str(path), 0, ctypes.byref(data), 0)
+    if not handle or handle == INVALID_HANDLE_VALUE:
+        return []
+    found = []
+    try:
+        while True:
+            name = data.cStreamName
+            if name and name != '::$DATA':
+                found.append((name, int(data.StreamSize)))
+            if not k32.FindNextStreamW(handle, ctypes.byref(data)):
+                break
+    finally:
+        k32.FindClose(handle)
+    return found
+
+
 def check_path(path):
     """Reject unsafe ancestors as well as unsafe leaf targets."""
     p = Path(os.path.abspath(path))
@@ -112,9 +155,11 @@ def hash_file(path, expected):
 
 
 class Scanner:
-    def __init__(self, roots, *, depth=None, top=20, min_size=0, excludes=(), duplicates=False, progress=True, allocation=False):
+    def __init__(self, roots, *, depth=None, top=20, min_size=0, excludes=(), duplicates=False, progress=True, allocation=False, streams=False):
         if allocation and os.name != 'nt':
             raise ValueError('--allocation is Windows-only')
+        if streams and os.name != 'nt':
+            raise ValueError('--streams is Windows-only')
         self.roots = [str(check_path(p)) for p in roots]
         for i, root in enumerate(self.roots):
             if not Path(root).is_dir():
@@ -132,6 +177,12 @@ class Scanner:
         self.limited = self.interrupted = False
         self.last_progress = 0
         self.allocation = allocation
+        self.streams = streams
+        self.stream_files = 0
+        self.stream_bytes = 0
+        self.stream_samples = []
+        self.changed_dirs = 0
+        self.changed_samples = []
         self.allocation_total = self.allocation_paths = self.allocation_links = 0
         self.allocation_ids = set()
 
@@ -156,6 +207,21 @@ class Scanner:
             self.skip_count += 1
         if len(bucket) < 200:
             bucket.append({'path': str(path), 'reason': reason})
+
+    def _settled(self, path, before):
+        """Re-stat a directory after walking it; a changed mtime means the report
+        mixes two states. Members appearing or disappearing move the directory's
+        mtime; files edited in place do not, so this catches the former only."""
+        try:
+            after = os.lstat(path)
+        except OSError:
+            return
+        if fingerprint(after)[3] != before[3]:
+            self.changed_dirs += 1
+            if len(self.changed_samples) < 20:
+                self.changed_samples.append({
+                    'path': str(path),
+                    'note': 'directory metadata changed while it was being scanned'})
 
     def keep(self, heap, size, path, identity):
         if size < self.min_size:
@@ -195,6 +261,7 @@ class Scanner:
                     entry = next(iterator)
                 except StopIteration:
                     iterator.close()
+                    self._settled(path, frame[4])
                     self.keep(self.big_dirs, frame[3], path, frame[4])
                     amount = frame[3]
                     stack.pop()
@@ -204,6 +271,7 @@ class Scanner:
                 except OSError as exc:
                     self.note(path, str(exc), True)
                     iterator.close()
+                    self._settled(path, frame[4])
                     amount = frame[3]
                     stack.pop()
                     if stack:
@@ -241,6 +309,16 @@ class Scanner:
                         self.keep(self.big_files, amount, target, fingerprint(info))
                         if self.allocation:
                             self.observe_allocation(target, info)
+                        if self.streams:
+                            named = alternate_streams(target)
+                            if named:
+                                self.stream_files += 1
+                                self.stream_bytes += sum(size for _name, size in named)
+                                if len(self.stream_samples) < 20:
+                                    self.stream_samples.append({
+                                        'path': target,
+                                        'streams': [{'name': name, 'bytes': size}
+                                                    for name, size in named]})
                         if self.duplicates and amount >= self.min_size and amount > 0:
                             self.candidates[amount].append((target, fingerprint(info)))
                     else:
@@ -252,6 +330,9 @@ class Scanner:
         finally:
             for frame in stack:
                 frame[2].close()
+
+    def _allocation_complete(self):
+        return not(self.interrupted or self.error_count or self.skip_count)
 
     def run(self):
         started = time.time()
@@ -296,33 +377,70 @@ class Scanner:
             self.interrupted = True
         rows = lambda heap: [dict(path=p, logical_bytes=s, fingerprint=list(fp))
                              for s, p, fp in sorted(heap, reverse=True)]
-        return dict(schema_version=1, roots=self.roots, exclusions=self.excludes,
+        report = dict(schema_version=1, roots=self.roots, exclusions=self.excludes,
                     started_at_unix=started, elapsed_seconds=round(time.time()-started, 3),
                     complete=not(self.interrupted or self.error_count or self.skip_count),
                     coverage_limited=self.limited, interrupted=self.interrupted,
                     scope=dict(depth=self.depth, top=self.top, min_size=self.min_size, duplicates=self.duplicates, allocation=self.allocation),
                     files=self.files, directories=self.dirs, logical_bytes=self.total,
-                    allocated_bytes=None, volumes=volumes, largest_files=rows(self.big_files),
+                    allocated_bytes=(self.allocation_total
+                                     if self.allocation and self._allocation_complete() else None),
+                    volumes=volumes, largest_files=rows(self.big_files),
+                    concurrent_change=dict(directories_changed=self.changed_dirs,
+                        samples=self.changed_samples,
+                        note='directories re-checked after walking them; a change means members'
+                             ' appeared or disappeared mid-scan (files edited in place are not detected)'),
+                    alternate_streams=dict(files_with_streams=self.stream_files,
+                        alternate_bytes=self.stream_bytes,
+                        samples=self.stream_samples,
+                        note='NTFS named streams; not included in logical or allocated bytes')
+                    if self.streams else None,
                     allocation_observation=(dict(reported_file_allocation_bytes=self.allocation_total,
                         paths_queried=self.allocation_paths, distinct_file_ids=len(self.allocation_ids),
                         repeated_hardlink_paths=self.allocation_links,
-                        complete=not(self.interrupted or self.error_count or self.skip_count),
+                        complete=self._allocation_complete(),
+                        upper_bound_of_reclaimable_bytes=True,
+                        excludes=['directories', 'filesystem metadata', 'alternate data streams'],
                         reclaimable_bytes=None) if self.allocation else None),
                     largest_directories=rows(self.big_dirs),
                     extensions=[dict(extension=e, files=n, logical_bytes=s) for e,(n,s) in sorted(self.types.items(), key=lambda x:x[1][1], reverse=True)],
                     duplicate_groups=groups, error_count=self.error_count, errors=self.errors,
                     skipped_count=self.skip_count, skipped=self.skipped,
-                    notes=['Logical sizes may count hard links multiple times; allocated/reclaimable bytes are unknown.',
+                    notes=[('Logical sizes may count hard links multiple times. Allocated bytes sum the allocation of '
+                            'distinct file IDs, exclude directories and filesystem metadata, and are an upper bound: '
+                            'deleting a file does not guarantee its blocks are freed, so reclaimable bytes stay unknown.')
+                           if self.allocation and self._allocation_complete() else
+                           ('Logical sizes may count hard links multiple times; allocated/reclaimable bytes are unknown.'),
                            'Directory totals overlap. Errors/skips are sampled up to 200 each.',
                            'Fingerprints capture the object metadata, not directory descendants or file contents.',
                            'Duplicate groups are hash matches, not permission to delete; identity can be unavailable and files can change.',
                            'Metadata is not a filesystem snapshot; concurrent changes may affect totals.'])
+        if self.changed_dirs:
+            report['notes'].append(
+                '%d director%s changed while being scanned; their totals mix two states.'
+                % (self.changed_dirs, 'y' if self.changed_dirs == 1 else 'ies'))
+        if self.streams:
+            report['notes'].append(
+                'Alternate data streams are enumerated but not counted in logical or allocated bytes.')
+        return report
 
 
 def render(report):
     lines = [f"Complete: {report['complete']} | Interrupted: {report['interrupted']}",
-             f"Files: {report['files']} | Directories: {report['directories']} | Logical bytes: {report['logical_bytes']}",
-             'Allocated/reclaimable bytes: unknown']
+             f"Files: {report['files']} | Directories: {report['directories']} | Logical bytes: {report['logical_bytes']}"]
+    if report.get('allocated_bytes') is not None:
+        lines.append(f"Allocated bytes (distinct file IDs): {report['allocated_bytes']} | "
+                     'Reclaimable bytes: unknown (deletion does not guarantee blocks are freed)')
+    else:
+        lines.append('Allocated/reclaimable bytes: unknown')
+    change = report.get('concurrent_change') or {}
+    if change.get('directories_changed'):
+        lines.append('Directories that changed while being scanned: %d (totals are approximate)'
+                     % change['directories_changed'])
+    if report.get('alternate_streams') is not None:
+        streams = report['alternate_streams']
+        lines.append('Alternate data streams: %d file(s), %d bytes outside logical/allocated totals'
+                     % (streams['files_with_streams'], streams['alternate_bytes']))
     if report.get('allocation_observation') is not None:
         lines.append('File allocation observation: ' + json.dumps(report['allocation_observation']))
         lines.append('Allocation excludes directory/metadata overhead and is not reclaimable space.')
@@ -346,6 +464,8 @@ def main(argv=None):
     parser.add_argument('--output', type=Path)
     parser.add_argument('--duplicates', action='store_true')
     parser.add_argument('--allocation', action='store_true', help='query Windows file allocation metadata and deduplicate file IDs')
+    parser.add_argument('--streams', action='store_true',
+                        help='enumerate NTFS alternate data streams (one call per file; slower)')
     parser.add_argument('--no-progress', action='store_true')
     args = parser.parse_args(argv)
     if args.top < 1 or (args.depth is not None and args.depth < 0):
@@ -363,7 +483,8 @@ def main(argv=None):
             if os.path.lexists(args.output):
                 raise ValueError('output already exists; refusing to overwrite')
         scanner = Scanner(args.paths, depth=args.depth, top=args.top, min_size=args.min_size,
-                          excludes=args.exclude, duplicates=args.duplicates, progress=not args.no_progress, allocation=args.allocation)
+                          excludes=args.exclude, duplicates=args.duplicates, progress=not args.no_progress, allocation=args.allocation,
+                          streams=args.streams)
         report = scanner.run()
         content = json.dumps(report, ensure_ascii=False, indent=2) if args.format == 'json' else render(report)
         if args.output:
