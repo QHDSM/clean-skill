@@ -1,10 +1,11 @@
 name: End-to-end recycle
+
+# Separate from test.yml on purpose: this job moves real files through the
+# Recycle Bin and restores them. A hosted runner that cannot recycle should not
+# turn every pull request red, so the job is scheduled and manual only.
+# continue-on-error is provisional until a hosted run has passed; remove it then.
+
 on:
-  # push is deliberate: workflows that arrive with only schedule/dispatch
-  # sometimes never register with the trigger system (dispatch answers 422 and
-  # the workflow shows its path as its name) until they have actually run once.
-  # continue-on-error below keeps this from blocking anyone.
-  push:
   workflow_dispatch:
   schedule:
     - cron: '0 18 * * *'
