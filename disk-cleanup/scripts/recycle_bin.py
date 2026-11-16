@@ -67,16 +67,53 @@ def _invalid(result, message):
     return result
 
 
+def _long_path_name(text):
+    """Ask Windows for the long spelling of a path, or None when it cannot say.
+
+    GetLongPathNameW fails when the path does not exist, and a path that was
+    just moved into the Recycle Bin no longer exists at its old location. So
+    the short name is expanded one component at a time instead.
+    """
+    try:
+        import ctypes
+        buffer = ctypes.create_unicode_buffer(32768)
+        length = ctypes.c_ulong(len(buffer))
+        if ctypes.windll.kernel32.GetLongPathNameW(
+                text, buffer, ctypes.byref(length)) and buffer.value:
+            return buffer.value
+    except (AttributeError, OSError, ValueError):
+        pass
+    return None
+
+
+def _expand_short_names(text):
+    """Rewrite every 8.3 short component of a path to its long name.
+
+    A hosted runner's TEMP is reported as C:\\Users\\RUNNER~1\\..., and the
+    Shell records C:\\Users\\runneradmin\\... for the same directory. The
+    conversion has to be per component: the whole path does not exist once the
+    file has moved into the bin, so a whole-path lookup fails.
+    """
+    drive, tail = os.path.splitdrive(text)
+    if not drive:
+        return text
+    parts = [part for part in tail.split('\\') if part]
+    current = drive + '\\'
+    for part in parts:
+        candidate = os.path.join(current, part)
+        expanded = _long_path_name(candidate)
+        current = expanded if expanded else candidate
+    return current
+
+
 def canonical_path(path):
     """Normalise a path so two spellings of the same file compare equal.
 
     The Recycle Bin records the path as Windows handed it to the Shell, and
-    that spelling is not always the one the caller has. A hosted runner stored
-    a path that did not compare equal to the very file it had just trashed.
-    The forms seen in the wild: the \\\\?\\ long-path prefix, the 8.3 short
-    name for a directory whose long name was not enabled, a trailing separator,
-    and a different case. This strips the prefix, resolves the short name, and
-    normalises the rest.
+    that spelling is not always the one the caller has: a hosted runner stores
+    the long name while its TEMP is reported as an 8.3 short name, and other
+    machines add the \\\\?\\ long-path prefix. This strips the prefix, expands
+    short names component by component, and normalises case and separators.
     """
     if not isinstance(path, str) or not path:
         return ''
@@ -94,16 +131,7 @@ def canonical_path(path):
     except (OSError, ValueError):
         resolved = text
     if os.name == 'nt':
-        # os.path.abspath does not expand an 8.3 short name; the Shell does.
-        try:
-            import ctypes
-            buffer = ctypes.create_unicode_buffer(32768)
-            length = ctypes.c_ulong(len(buffer))
-            if ctypes.windll.kernel32.GetLongPathNameW(
-                    text, buffer, ctypes.byref(length)):
-                resolved = buffer.value
-        except (AttributeError, OSError, ValueError):
-            pass
+        resolved = _expand_short_names(resolved)
     return os.path.normcase(os.path.normpath(resolved))
 
 

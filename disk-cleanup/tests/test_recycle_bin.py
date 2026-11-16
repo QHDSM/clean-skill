@@ -65,6 +65,29 @@ class CanonicalPathTests(unittest.TestCase):
         self.assertTrue(recycle_bin.same_path('C:/Temp/a.txt', 'C:////Temp////a.txt'))
 
     @unittest.skipUnless(os.name == 'nt', 'short names are a Windows notion')
+    def test_a_short_name_expands_even_when_the_file_is_gone(self):
+        # The file has moved into the Recycle Bin, so the whole path does not
+        # exist and a whole-path lookup fails. The short name of the parent
+        # still resolves, which is what makes the two spellings comparable.
+        import ctypes
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp) / 'a-directory-with-a-very-long-name-for-shortnames'
+            directory.mkdir()
+            buffer = ctypes.create_unicode_buffer(32768)
+            length = ctypes.c_ulong(len(buffer))
+            if not ctypes.windll.kernel32.GetShortPathNameW(
+                    str(directory), buffer, ctypes.byref(length)):
+                self.skipTest('this volume has no short names')
+            short = buffer.value
+            if short == str(directory):
+                self.skipTest('short names are not enabled on this volume')
+            gone = os.path.join(short, 'already-deleted.txt')
+            self.assertFalse(os.path.exists(gone))
+            self.assertTrue(recycle_bin.same_path(
+                gone, str(directory / 'already-deleted.txt')))
+
+    @unittest.skipUnless(os.name == 'nt', 'short names are a Windows notion')
     def test_an_eight_dot_three_name_resolves_to_the_long_name(self):
         import ctypes
         import tempfile
