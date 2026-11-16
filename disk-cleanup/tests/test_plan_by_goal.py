@@ -122,6 +122,31 @@ class CandidateTests(unittest.TestCase):
         self.assertEqual(pool[0]['path'], 'C:\\work\\npm')
         self.assertEqual(pool[0]['risk'], 'safe')
 
+    def test_a_running_application_is_named_in_the_reason(self):
+        procs = {'names': ['chrome.exe'], 'paths': set()}
+        with patch.object(goal.git_discovery, 'discover', return_value=CLEAN), \
+                patch.object(goal.clean, 'is_denied', return_value=None):
+            pool = goal.candidates(
+                report(dirs=[row('C:\\work\\chrome', 5 * MIB)]),
+                index=[{'root': 'C:\\work\\chrome', 'risk': 'safe', 'reason': 'Chrome 缓存',
+                        'running': [{'type': 'exe', 'value': 'chrome.exe'}]}],
+                scope=['C:\\work'], procs=procs, now=1_800_000_000)
+        self.assertEqual(pool[0]['running'], ['chrome.exe'])
+        self.assertIn('chrome.exe 正在运行', pool[0]['reason'])
+        self.assertIsNone(pool[0]['fatal'], 'a running app is a warning, not a veto')
+
+    def test_an_absent_process_leaves_the_reason_alone(self):
+        procs = {'names': ['explorer.exe'], 'paths': set()}
+        with patch.object(goal.git_discovery, 'discover', return_value=CLEAN), \
+                patch.object(goal.clean, 'is_denied', return_value=None):
+            pool = goal.candidates(
+                report(dirs=[row('C:\\work\\chrome', 5 * MIB)]),
+                index=[{'root': 'C:\\work\\chrome', 'risk': 'safe', 'reason': 'Chrome 缓存',
+                        'running': [{'type': 'exe', 'value': 'chrome.exe'}]}],
+                scope=['C:\\work'], procs=procs, now=1_800_000_000)
+        self.assertEqual(pool[0]['running'], [])
+        self.assertEqual(pool[0]['reason'], 'Chrome 缓存')
+
 
 class PickTests(unittest.TestCase):
     def item(self, path, size, fatal=None, risk='caution'):

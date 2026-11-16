@@ -123,7 +123,8 @@ def git_assessment(path, kind, *, run_audit, cache):
     return None, audit
 
 
-def candidates(report, *, index, scope, run_audit=False, min_age_days=0, excluded=(), now=None):
+def candidates(report, *, index, scope, run_audit=False, min_age_days=0, excluded=(),
+               procs=None, now=None):
     """Candidates from both top lists, each assessed before it can be chosen.
 
     Three things make a candidate unusable no matter how large it is: the gate
@@ -151,7 +152,7 @@ def candidates(report, *, index, scope, run_audit=False, min_age_days=0, exclude
                     continue
             if any(scan.within(path, root) or scan.within(root, path) for root in excluded):
                 continue
-            risk, reason = classify({'path': path}, index)
+            risk, reason, hits = classify({'path': path}, index, procs)
             fatal = None
             if scan.normalized(path) in roots:
                 fatal = 'this is the scan root; choose a subdirectory instead'
@@ -162,7 +163,7 @@ def candidates(report, *, index, scope, run_audit=False, min_age_days=0, exclude
                 fatal, git_evidence = git_assessment(path, kind, run_audit=run_audit, cache=audits)
             pool.append({'path': path, 'bytes': size, 'kind': kind,
                          'fingerprint': fingerprint, 'risk': risk, 'reason': reason,
-                         'fatal': fatal, 'git': git_evidence})
+                         'fatal': fatal, 'git': git_evidence, 'running': hits})
     # Verified caches first, then whatever is largest. Size alone would always
     # put an unclassified directory ahead of a known cache.
     pool.sort(key=lambda item: (0 if item['risk'] == 'safe' else 1, -item['bytes'], item['path']))
@@ -192,7 +193,7 @@ def pick(pool, required, max_targets):
 
 
 def registry_index(path):
-    """Map known cache roots to (risk, reason) so a verified cache keeps its label."""
+    """Map known cache roots to (risk, reason), keeping the running-process probe."""
     if not path or not os.path.exists(path):
         return []
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -204,15 +205,38 @@ def registry_index(path):
             continue
         for expanded in targets.expand(cleaner)[0]:
             index.append({'root': expanded, 'risk': cleaner['risk'],
+                          'running': cleaner.get('running') or [],
                           'reason': f"{cleaner['label']}：{cleaner.get('regenerates') or cleaner['description']}"})
     return index
 
 
-def classify(candidate, index):
+def live_processes():
+    try:
+        import targets
+        return targets.processes()
+    except (OSError, ValueError, ImportError):
+        return None
+
+
+def running_hits(entry, procs):
+    """Which of the registry's probes are live right now, by name."""
+    probes = entry.get('running') or []
+    if not probes or procs is None:
+        return []
+    import targets
+    outcome = targets._probe_running(probes, procs)
+    return [match['value'] for match in outcome['matches'] if match['detected']]
+
+
+def classify(candidate, index, procs=None):
     for entry in index:
         if scan.within(candidate['path'], entry['root']):
-            return entry['risk'], entry['reason']
-    return 'caution', '按逻辑体积排序的候选，用途与可重建性尚未核实'
+            hits = running_hits(entry, procs)
+            reason = entry['reason']
+            if hits:
+                reason += f"（{', '.join(hits)} 正在运行：它打开的文件会逐项被拒绝，先关闭或让用户确认）"
+            return entry['risk'], reason, hits
+    return 'caution', '按逻辑体积排序的候选，用途与可重建性尚未核实', []
 
 
 def build_plan(report, chosen, index, *, goal, scope, excluded, note):
@@ -293,8 +317,9 @@ def main(argv=None):
                      f"needs {human(worst['deficit_bytes'])} moved out")
 
     index = registry_index(args.registry) if args.registry else []
+    procs = live_processes() if index else None
     pool = candidates(report, index=index, scope=scope, run_audit=args.git_audit,
-                      min_age_days=args.min_age_days, excluded=args.exclude)
+                      min_age_days=args.min_age_days, excluded=args.exclude, procs=procs)
     chosen, skipped = pick(pool, requested, args.max_targets)
 
     estimated = sum(item['bytes'] for item in chosen)
@@ -330,6 +355,10 @@ def main(argv=None):
         print(f"goal       : move {human(requested)}")
         print(f"basis      : {goal['basis']}")
         print(f"selected   : {len(chosen)} target(s), {human(estimated)} at scan time")
+        busy = sum(1 for item in chosen if item.get('running'))
+        if busy:
+            print(f"running    : {busy} target(s) belong to a running application; "
+                  'files it holds open will be refused one by one')
         if goal['met']:
             print('status     : goal reached on paper')
         else:

@@ -81,6 +81,9 @@ IID_IFILE_OPERATION = '947aab5f-0a5c-4c13-b4d6-4bf7836fc9f8'
 IID_ISHELL_ITEM = '43826d1e-e718-42ee-bc55-a1e261c37bfe'
 
 SUPPORTED_FILESYSTEMS = {'NTFS', 'REFS'}
+# GetVolumeInformationW flags; a read-only volume cannot accept a payload, and
+# saying so at preview time beats discovering it one refused target at a time.
+FILE_READ_ONLY_VOLUME = 0x00080000
 
 
 class BackendUnavailable(Exception):
@@ -436,9 +439,12 @@ def _no_recycle_policy():
     return False
 
 
-def _capability_issues(filesystem, supported, sid, bin_root, policy, no_recycle):
+def _capability_issues(filesystem, supported, sid, bin_root, policy, no_recycle,
+                       read_only=False):
     """Every reason this volume cannot be promised recycle-only behavior."""
     issues = []
+    if read_only:
+        issues.append('volume is mounted read-only: nothing can be moved into its Recycle Bin')
     if not filesystem:
         issues.append('volume information unavailable')
     elif not supported:
@@ -480,13 +486,16 @@ def volume_profile(drive):
     except OSError:
         free = None
     supported = filesystem in SUPPORTED_FILESYSTEMS if filesystem else False
+    read_only = bool(ok and flags.value & FILE_READ_ONLY_VOLUME)
     no_recycle = _no_recycle_policy()
-    issues = _capability_issues(filesystem, supported, sid, bin_root, policy, no_recycle)
+    issues = _capability_issues(filesystem, supported, sid, bin_root, policy, no_recycle,
+                                read_only=read_only)
     return {
         'schema': SCHEMA,
         'drive': drive,
         'filesystem': filesystem,
         'supported_filesystem': supported,
+        'read_only_volume': read_only,
         'sid': sid,
         'recycle_bin_root': bin_root,
         'recycle_bin_root_exists': bool(bin_root and os.path.isdir(bin_root)),
@@ -509,6 +518,8 @@ def fits_capacity(profile, size_bytes):
     answered silently by FOF_NOERRORUI.
     """
     capacity = profile.get('max_capacity_mb')
+    if profile.get('read_only_volume'):
+        return False, 'volume is mounted read-only: nothing can be moved into its Recycle Bin'
     if capacity == 0:
         return False, 'MaxCapacity=0: this volume is configured to delete permanently'
     if capacity is None:

@@ -27,6 +27,7 @@
 | `scripts/targets.py` | 只读展开候选注册表：存在性、逻辑大小、门禁冲突、占用进程 | 无 |
 | `scripts/usn.py` | NTFS 变更日志：存检查点、列出增量变更（需管理员；只给路径与原因，不给大小） | 无 |
 | `scripts/plan_by_goal.py` | 按容量目标起草 `plan.json`：目标不足时报缺口，不扩范围、不降风险 | 无 |
+| `scripts/e2e_check.py` | 全链路验收：在临时目录里扫描、回收、撤销并逐字节比对 | 仅临时目录内自建文件 |
 | `scripts/clean.py` | 校验计划、dry-run、回收站执行与 `--undo` | 仅回收站移动 |
 | `scripts/recycle_backend.py` | 可证明的回收后端（句柄最终路径 + 回调否决 + 卷能力） | 仅回收站移动 |
 | `scripts/recycle_bin.py` | 解析 `$I`/`$R`、按卷枚举、还原 | 还原与删索引 |
@@ -173,6 +174,16 @@ Remove-Item Env:DISK_CLEANUP_LIVE_TEST_PARENT
 ```
 
 `recycle_backend.py` 与 `clean.py` 的回收路径是纯标准库 ctypes，实机测试不需要 pywin32。覆盖：普通文件回收、嵌套目录回收、被占用文件拒绝且幸存、`$I`/`$R` 往返还原、进程被杀后按 intent 记录恢复、组策略/容量/`NukeOnDelete` 拒绝路径（单元测试）。跨卷目标、真实断电（目前只模拟到清单半行截断）、需要管理员的卷尚未实测，详见[执行研究与缺口](disk-cleanup/references/recycle-research.md)。
+
+全链路验收可以一条命令跑完 `扫描 → 计划 → dry-run → --go → 撤销 → 逐字节比对`，只碰它自己在临时目录里创建的文件：
+
+```powershell
+python disk-cleanup/scripts/e2e_check.py --drive C:
+$env:DISK_CLEANUP_E2E = '1'   # 需要它进 unittest 时
+python -m unittest disk-cleanup.tests.test_e2e -v
+```
+
+它先跑 `recycle_selfcheck.py` 证明该卷能回收并还原，然后断言每个目标 `recycle.status=RECYCLED`、`proof.final_path` 落在 `$RECYCLE.BIN` 下、撤销后 `verified` 不为 false、恢复的字节与原文件一致。CI 里是独立作业（`.github/workflows/e2e.yml`），定时与手动触发，不阻塞普通 PR。
 
 `--allocation` 的 `allocated_bytes` 是**上层口径而不是承诺**：按 128 位 FileId 去重（硬链接只算一次），排除目录与文件系统元数据，并且是删除后可释放空间的**上限**；`reclaimable_bytes` 恒为 `unknown`，观察不完整时 `allocated_bytes` 为 `null`。本机实测（5 个路径含 1 个硬链接）：逻辑 8,388,608B，逐路径分配之和 8,388,608B，按 FileId 去重后 7,340,032B，报告值与去重值一致，硬链接那 1,048,576B 只计一次。
 

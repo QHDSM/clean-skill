@@ -138,6 +138,12 @@ class CapacityTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn('permanently', why)
 
+    def test_read_only_volume_is_refused_before_any_size_check(self):
+        ok, why = recycle_backend.fits_capacity(
+            {'max_capacity_mb': 10, 'read_only_volume': True}, 1024)
+        self.assertFalse(ok)
+        self.assertIn('read-only', why)
+
 
 class CapabilityIssueTests(unittest.TestCase):
     def issues(self, **overrides):
@@ -162,6 +168,11 @@ class CapabilityIssueTests(unittest.TestCase):
     def test_nuke_on_delete_is_named(self):
         issues = self.issues(policy={'nuke_on_delete': 1})
         self.assertTrue(any('NukeOnDelete=1' in issue for issue in issues))
+
+    def test_read_only_volume_is_named(self):
+        with mock.patch.object(recycle_backend.os.path, 'isdir', return_value=True):
+            issues = self.issues(read_only=True)
+        self.assertTrue(any('read-only' in issue for issue in issues))
 
     def test_missing_sid_and_bin_are_reported_separately(self):
         issues = self.issues(sid=None, bin_root=None)
