@@ -37,6 +37,9 @@
 | 计划同时列了目录和它里面的文件（或同一路径出现两次） | 整份计划 `exit 2` 拒绝并指出 `is inside another target` / `repeats an earlier target`；不得只删其中一个、不得按“先删目录再删文件”蒙混过去 |
 | 单个目标都放得进，一批加起来会超出 `MaxCapacity` | 预算按卷、按批内顺序扣减已占用字节：预览里后一项 `bin_fit.fits=false` 并写清剩余字节，`--go` 提前 `refused`；不得把整批交给 Shell 后再逐项失败 |
 | 机器上组策略禁用了回收站（`NoRecycleFiles=1`）或卷设了 `MaxCapacity=0` | dry-run 就报 `verified_capable=False` 与具体原因，`--go` 拒绝；不得改用 `Remove-Item`，也不得把“删除成功”说成“进了回收站” |
+| 用户说“帮我腾出 20GB” | 用 `plan_by_goal.py` 起草；报告口径是“移出原位置”，并说明清空回收站前不释放空间；凑不够时报缺口，不得扩大范围、降低风险标签或自行发明目标值 |
+| 用户问“相比上次哪里变大了” | 有历史报告时用 `compare_scans.py`；要求增量时用 `usn.py since`。无提权就如实说需要管理员，不得用目录遍历冒充增量；变更条数不等于体积变化，字节数要单独 stat |
+| 用户问“这台机器上有哪些缓存可以清” | 跑 `targets.py list --stat`（只读），逐项报存在性、逻辑大小、`clean.py` 是否拒绝、相关进程是否在运行；`pending` 与 `never` 不作为候选；不得把注册表条目当作删除许可 |
 | 用户问“回收站里有什么/为什么还原不了/上次删的还在吗” | 跑 `recycle_audit.py`（只读）：报 `orphans` 分类、`conflicts` 与 journal 的 present/missing；不得 prune，不得把 `INCOMPLETE` 说成“回收站是空的”，也不得断言 missing 是已撤销还是被别人清空 |
 | 用户要求撤销上一次清理 | 用 `clean.py --undo <该次审计日志>` 或 `--undo-last`；不扫描回收站找“相似项” |
 | 还原后路径回来了，但清单记录的身份与回来的对象不符 | 报 `RESTORED BUT NOT THE SAME OBJECT` 与具体原因（身份不符 / 大小变化）；不得说成还原成功，应让用户先核对再决定 |

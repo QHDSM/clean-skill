@@ -24,6 +24,9 @@
 | 脚本 | 能力 | 是否删除 |
 |---|---|---|
 | `scripts/scan.py` | 只读扫描、分类、重复文件检测、`--allocation` 实测分配字节、`--streams` 枚举 NTFS 命名数据流、扫描期间目录变动检测 | **无任何删除能力** |
+| `scripts/targets.py` | 只读展开候选注册表：存在性、逻辑大小、门禁冲突、占用进程 | 无 |
+| `scripts/usn.py` | NTFS 变更日志：存检查点、列出增量变更（需管理员；只给路径与原因，不给大小） | 无 |
+| `scripts/plan_by_goal.py` | 按容量目标起草 `plan.json`：目标不足时报缺口，不扩范围、不降风险 | 无 |
 | `scripts/clean.py` | 校验计划、dry-run、回收站执行与 `--undo` | 仅回收站移动 |
 | `scripts/recycle_backend.py` | 可证明的回收后端（句柄最终路径 + 回调否决 + 卷能力） | 仅回收站移动 |
 | `scripts/recycle_bin.py` | 解析 `$I`/`$R`、按卷枚举、还原 | 还原与删索引 |

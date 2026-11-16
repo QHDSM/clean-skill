@@ -46,3 +46,31 @@ Windows 实机测试已覆盖 COM 初始化、接口创建、设置标志、创�
 `recycle_sink_experimental.py` 为原型提供可选的逐项 COM 回调观察。根据 [Microsoft PostDeleteItem 文档](https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nf-shobjidl_core-ifileoperationprogresssink-postdeleteitem)，回调包含实际删除 HRESULT，非空的新项目指针表示回收站中的项目；原型只记录是否提供该指针，不在回调结束后使用借用指针。HRESULT 按失败位判断，不能仅接受零值。本机普通文件和嵌套目录实测收到非零成功值及非空回收项目，随后仍独立执行恢复和内容验证。观察器在删除前缺少回收请求标志时拒绝，但该标志仅表示尽可能回收，不能证明未来不会降级；当时后端因此仍报告 UNKNOWN、正式执行停用。现在的 `recycle_backend.py` 用删除后内核返回的最终路径消除这一不确定性，不再依赖该标志本身作结论。回调检查在测试对象恢复清理后断言，避免证据断言阻断测试恢复。
 
 原型新增显式拒绝删除的回调模式：`NativeAdapter(permit_delete=False)` 会强制附加观察器，即使未请求观察；`PreDeleteItem` 返回失败以取消操作。C、D 两块磁盘的自建文件和嵌套目录测试确认，回调拒绝后隔离对象仍可按身份回滚到原名，随机内容和文件 ID 保持，且没有成功回收项目的回调证据。此测试仅覆盖程序主动拒绝，不覆盖用户界面取消、系统终止或断电。当时它没有改变执行入口的停用状态；该模式（`0x80` 位检查 + `E_ABORT`）现已整合进 `recycle_backend.py` 的正式路径。
+
+---
+
+# 与 freedesktop.org Trash 规范对照（2026-11-16）
+
+本节不是移植计划。Linux 的 Trash 规范（`$XDG_DATA_HOME/Trash`、跨挂载点的 `.Trash/$uid` 或 `.Trash-$uid`、`info/*.trashinfo` 里的 `Path=` 与 `DeletionDate=`）与 Windows 的 `$Recycle.Bin\<SID>\` + `$I`/`$R` 是两套独立实现。对照的价值在于**别人把边界写成了条文**，可以拿来逐条核对我们有没有漏。
+
+| 规范要求 | 我们的做法 | 结论 |
+|---|---|---|
+| 回收站按用户隔离 | 按 SID 分目录；别的 SID 读不到时整盘标 `INCOMPLETE` | 一致，但我们明确区分"证据不足"与"回收站为空" |
+| 回收站必须在文件所在挂载点上，不得跨挂载点搬运 | `volume_profile` 按目标所在卷读回收站与策略 | 一致；跨卷目标在预览阶段就被拒 |
+| 无法建立/使用回收站时**不得删除** | `verified_capable=False` 即拒绝；回调否决任何未标记为回收的删除 | 一致，且我们有第二道守卫 |
+| 还原时目标已存在不得静默覆盖 | 报冲突、保留回收站副本、绝不覆盖 | 一致 |
+| 文件名冲突需保证唯一 | 交给 Windows 生成 `$R` 名；撤销只认 `$I`/`$R` 配对，不靠改名 | 一致，路径依赖更少 |
+| 元数据可被外部修改/损坏 | `$I` 二进制解析失败、命名为目录等情况归入 `invalid_i` / `i_named_directory` | 规范未要求；我们更严 |
+| 元数据缺失但载荷存在（或反之） | `orphans` 四分类：`i_without_r`、`r_without_i`、`invalid_i`、`i_named_directory` | 规范未定义；我们更严 |
+| 还原后如何证明"回来的是原来那个东西" | 用清单里的 128 位 FileId 与大小复核，不符报 `RESTORED BUT NOT THE SAME OBJECT` | 规范与 Windows 都不要求；这是我们的净增量 |
+| 并发操作 | 规范不论；我们持每用户互斥量，执行与撤销互斥 | 我们更严 |
+| 保留期/容量上限 | 规范不论；我们读 `MaxCapacity`、`NukeOnDelete`、`NoRecycleFiles` | 我们跟随系统策略 |
+
+## 对照后仍存的差距
+
+1. **只读卷与不可写回收站的前置检查**：`recycle_selfcheck.py` 在临时目录证明"本机能回收并还原"，但那是自检时刻、自检盘符。执行批次时如果某卷在自检之后变为只读或回收站目录被改权限，目前靠执行期逐项失败发现，而不是预览阶段一次性报出。待补：把"目标卷可写 + 回收站目录可写"并入 `bin_fit`。
+2. **多用户回收站**：别的 SID 无权限时我们只能标 `INCOMPLETE`，无法像 per-uid 目录那样按权限逐个读取。这是 Windows ACL 的限制，不是实现选择，但报告里必须继续说"证据不足"，不能说"没有条目"。
+3. **可移动介质**：FAT/exFAT 卷可能根本没有回收站。规范对此有"顶层 `.Trash` 不存在则不得删除"的明确要求；我们靠 `verified_capable` 拒绝，但没有针对可移动介质的专门提示。
+4. **`DeletionDate` 的等价物**：`$I` 记录删除时间，但精度与来源（本地时间 vs UTC）在不同 Windows 版本上不一致。`--undo` 的 ±5 秒窗口已考虑这一点，仍未做跨版本验证。
+
+第 1 条是唯一会改变执行路径的缺口，其余三条是报告措辞与覆盖面问题。

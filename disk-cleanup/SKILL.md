@@ -68,11 +68,15 @@ python scripts/git_audit.py '<仓库路径>' --format json
 
 读取 [Windows 指南](references/windows.md) 处理系统、权限和路径；遇到个人文件、浏览器、备份、云文件或重复项，读 [分类规则](references/cleanup-categories.md)；遇到开发工具或容器，读 [开发环境指南](references/development-tools.md)。
 
+需要一份可审计的候选清单时，用 `python scripts/targets.py list --stat`（只读）：它按 [候选注册表](references/targets.json) 展开系统、浏览器与开发工具的已知缓存位置，逐项给出存在性、逻辑大小、`clean.py` 是否拒绝该路径，以及相关进程是否正在运行。`status: pending` 是尚未验证的类别，`risk: never` 是保护声明，两者都不参与候选；被门禁拒绝的路径必须在报告里如实说明，不要绕过。注册表只说明"值得考虑"，不构成删除许可——每一项仍要写进 `plan.json` 并携带扫描时的证据。
+
 将测量和推断分开：路径名称只是线索，不证明可删除。候选表包含路径、用途依据、逻辑大小/估计收益、操作、风险和可恢复性。未知应用只报告，不猜测。
 
 用户问回收站里有什么、某次执行的对象还在不在、为什么还原不了时，用 `python scripts/recycle_audit.py`（见第 4 节末）。
 
 用户询问“相比上次哪里变大”时，先用 `python scripts/compare_scans.py '<旧扫描.json>' '<新扫描.json>'` 比较已有报告，详见 [扫描对比规则](references/scan-comparison.md)。只有 `comparable: true` 时使用差值；Top 列表缺席不是新增、删除或零大小的证明。基线报告含个人路径，保留本地，不上传或提交。
+
+需要“自上次以来变了什么”而不想重扫全盘时，可用 NTFS 变更日志：先 `python scripts/usn.py baseline --drive C:` 存检查点，之后 `python scripts/usn.py since --drive C: --json` 只列变更路径。它**需要管理员**——打不开卷就退出 3 并说明原因，不要改用目录遍历冒充增量。USN 记录只有文件名、父引用和原因，**没有大小**：变更条数不等于体积变化，字节数要对列出的路径单独 stat。日志被删除或重建、变更量大到可能回绕、索引超出内存预算时，它一律拒绝回答而不是猜；这时退回全量扫描。
 
 ## 4. 把执行意图写成计划
 
@@ -92,10 +96,11 @@ Windows 下还可用 `python scripts/windows_identity.py '<路径>'` 采集句�
  "reason":"45 天未改的构建缓存","evidence":{"fingerprint":[1,2,3,4,5]}}]}
 ```
 
+用户给的是容量目标时（"腾出 20GB"、"C 盘至少留 50GB"），用 `python scripts/plan_by_goal.py --scan scan.json --target 20GiB --git-audit --out plan.json` 起草。目标是**移动量**，不是释放量：所有动作只进回收站，清空前不释放空间，报告必须两个口径分开说。凑不够时脚本照写计划并报出缺口，如实转达；不要通过扩大扫描范围、降低风险标签或提高 `--max-targets` 去凑数。没有目标就不要自己发明一个——不给 `--target` 或 `--free-below` 时脚本直接拒绝。
+
 计划交给 `clean.py` 预览，它读取计划，不重放扫描结果：
 
-```powershell
-python scripts/recycle_selfcheck.py --drive C:    # 先自检：本机能否回收并还原（一次性探针）
+```powershellpython scripts/recycle_selfcheck.py --drive C:    # 先自检：本机能否回收并还原（一次性探针）
 python scripts/clean.py --plan plan.json          # dry-run，只打印
 python scripts/clean.py --plan plan.json --go     # 回收站执行，每项带证据
 python scripts/clean.py --undo ~/.disk-cleanup/runs/audit-<时间戳>.jsonl   # 撤销一次执行

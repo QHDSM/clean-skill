@@ -95,6 +95,35 @@ def die(code, message):
     return code
 
 
+GOAL_SCHEMA = 'disk-cleanup-goal/v1'
+GOAL_KINDS = {'move_bytes'}
+
+
+def validate_goal(goal):
+    """Validate a capacity goal, and refuse one whose own numbers disagree.
+
+    The goal is a *move* goal: this executor only ever fills the Recycle Bin, so
+    a plan may say how many bytes leave their current location, never how much
+    free space appeared. `met` and `shortfall_bytes` are recomputed rather than
+    trusted, so a plan cannot claim success by editing a boolean.
+    """
+    if not isinstance(goal, dict):
+        raise GateError('goal must be an object or null')
+    if goal.get('schema') != GOAL_SCHEMA:
+        raise GateError(f'goal.schema must be {GOAL_SCHEMA!r}')
+    if goal.get('kind') not in GOAL_KINDS:
+        raise GateError(f'goal.kind must be one of {sorted(GOAL_KINDS)}')
+    for field in ('requested_bytes', 'estimated_bytes'):
+        value = goal.get(field)
+        if type(value) is not int or value < 0:
+            raise GateError(f'goal.{field} must be a non-negative integer')
+    shortfall = max(0, goal['requested_bytes'] - goal['estimated_bytes'])
+    if 'shortfall_bytes' in goal and goal['shortfall_bytes'] != shortfall:
+        raise GateError('goal.shortfall_bytes does not match requested minus estimated')
+    if 'met' in goal and goal['met'] is not (shortfall == 0):
+        raise GateError('goal.met does not match requested minus estimated')
+
+
 # ------------------------------------------------------------------- run lock
 
 # Only one execution may move objects at a time: two runs interleaving would
@@ -183,6 +212,10 @@ def load_plan_with_digest(path):
         raise GateError('this executor never performs permanent deletion')
     if 'git_acknowledged' in auth and type(auth['git_acknowledged']) is not bool:
         raise GateError('authorization.git_acknowledged must be boolean')
+
+    goal = plan.get('goal')
+    if goal is not None:
+        validate_goal(goal)
 
     targets = plan.get('targets')
     if not isinstance(targets, list) or not targets:
@@ -1041,10 +1074,28 @@ def run(args):
     trashed = [r for r in results if r['result'] == 'trashed']
     freed = sum(r.get('size_bytes') or 0 for r in trashed)
     backend = recycle_backend.availability()
+    goal_report = None
+    if plan and plan.get('goal'):
+        goal = plan['goal']
+        planned = sum((t.get('evidence') or {}).get('size_bytes') or 0 for t in plan['targets'])
+        goal_report = {
+            'requested_bytes': goal['requested_bytes'],
+            'estimated_bytes': goal['estimated_bytes'],
+            'planned_evidence_bytes': planned,
+            'unmeasured_targets': sum(1 for t in plan['targets']
+                                      if (t.get('evidence') or {}).get('size_bytes') is None),
+            'shortfall_bytes': max(0, goal['requested_bytes'] - goal['estimated_bytes']),
+            'met_on_paper': goal['estimated_bytes'] >= goal['requested_bytes'],
+            'reclaimed_bytes': 0,
+            'note': ('estimated is scan-time logical size. reclaimed stays 0 because moving to '
+                     'the Recycle Bin frees no space until it is emptied; moved_bytes also '
+                     'under-reports directories, which have no size_bytes of their own.'),
+        }
     return {
         'mode': 'EXECUTED' if args.go else 'DRY-RUN',
         'plan': args.plan,
         'plan_digest': digest,
+        'goal': goal_report,
         'execution_available': backend['available'],
         'execution_unavailable_reason': None if backend['available'] else backend['reason'],
         'preview_warning': 'Directory contents and Git risks are not fully verified.',
@@ -1093,6 +1144,15 @@ def render(report):
     if report['mode'] == 'UNDO' and summary.get('trashed'):
         lines.append('  restores verified against the recorded file identity: %d/%d'
                      % (summary.get('verified', 0), summary['trashed']))
+    goal = report.get('goal')
+    if goal:
+        state = ('goal met on paper' if goal['met_on_paper']
+                 else 'SHORT by %d MiB' % (goal['shortfall_bytes'] >> 20))
+        lines.append('  goal: move %d MiB, estimated %d MiB at scan time -- %s'
+                     % (goal['requested_bytes'] >> 20, goal['estimated_bytes'] >> 20, state))
+        lines.append('  goal: reclaimed 0 B until the Recycle Bin is emptied; '
+                     '%d target(s) carry no size_bytes of their own'
+                     % goal['unmeasured_targets'])
     if summary.get('capacity_warnings'):
         lines.append('  WARNING: %d target(s) exceed the Recycle Bin capacity; --go would '
                      'refuse them. Split or shrink the batch.' % summary['capacity_warnings'])

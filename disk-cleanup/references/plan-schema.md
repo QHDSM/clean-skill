@@ -13,8 +13,25 @@
 | `schema` | string | ✅ | 必须是 `disk-cleanup-plan/v1` |
 | `generated_unix` | integer | 建议 | 计划生成时间（Unix 秒），用于判断计划是否过旧 |
 | `authorization` | object | ✅ | 见下 |
+| `goal` | object | ❌ | 见「goal」一节；省略表示这份计划不声称达成任何容量目标 |
 | `targets` | array | ✅ | 非空；单份计划最多 200 项 |
 | `note` | string | ❌ | 给用户的说明，不参与校验 |
+
+## goal
+
+`plan_by_goal.py` 会写这一段；手写计划也可以省略。它是**移动目标**，不是释放目标：本执行器只把对象移进回收站，清空前不释放空间，所以计划只能声称"多少字节离开原位置"。
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `schema` | string | ✅ | 必须是 `disk-cleanup-goal/v1` |
+| `kind` | string | ✅ | 目前只有 `move_bytes` |
+| `requested_bytes` | integer | ✅ | 非负；用户要移动的字节数，或按 `--free-below` 反推出的缺口 |
+| `estimated_bytes` | integer | ✅ | 非负；按扫描时逻辑大小估算的选中总量 |
+| `shortfall_bytes` | integer | ❌ | 若给出，必须等于 `max(0, requested − estimated)` |
+| `met` | boolean | ❌ | 若给出，必须与 `estimated ≥ requested` 一致 |
+| `basis` / `policy` / `caveats` | — | ❌ | 说明性字段，不参与门禁 |
+
+`clean.py` **重算**缺口与达成状态，不信任写入的布尔值；自相矛盾的目标整份拒绝（退出码 2）。报告里的 `goal.reclaimed_bytes` 恒为 0，`moved_bytes` 对目录项会少报，因为目录没有自己的 `size_bytes`。
 
 ## authorization
 
