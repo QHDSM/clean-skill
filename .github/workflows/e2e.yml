@@ -12,4 +12,4 @@ jobs:
         with:
           python-version: '3.12'
       - name: Recycle and restore a throwaway directory
-        run: python disk-cleanup/scripts/e2e_check.py --drive C:
+        run: python disk-cleanup/scripts/e2e_check.py --drive "C:"
