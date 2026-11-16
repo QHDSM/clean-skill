@@ -11,8 +11,9 @@
 |---|---|
 | 项目名 | `disk-cleanup`（Windows 磁盘清理 agent skill） |
 | 交付仓库 | `QHDSM/clean-skill`（公开，MIT） |
-| 远端 HEAD | `3f6e740` |
-| 本地 HEAD | `eda4b74`，**80 个提交**，62 个跟踪文件 |
+| 远端 HEAD | 见 `git log -1`（本文档写作时为 `624cb7d`） |
+| 本地 HEAD | **提交数与文件数以 `git rev-list --count HEAD` / `git ls-files | wc -l` 为准**——本文档自身会改变这两个数字，所以不写死 |
+| 跟踪文件 | 63（本文档写作时） |
 | 测试 | `Ran 423, OK (skipped=18)` |
 | CI | `Validate scanner` ✅ / `End-to-end recycle` ✅（均为绿） |
 | 运行时 | Python 3.10+，**纯标准库**，无第三方依赖 |
@@ -34,7 +35,7 @@ Z:\磁盘清理-skill\
 │   ├── push_via_api.py           ← 推送脚本（不在仓库内，见 §7.2）
 │   ├── clean-skill.bundle        ← 全量历史打包，280KB
 │   ├── 0001-0002-cleanup-executor.patch
-│   ├── 0003-0080-provable-executor.patch   ← 第 3–80 个提交，78 个
+│   ├── 0003-NNNN-provable-executor.patch   ← 第 3 个到最后一个提交（NNNN=总提交数）
 │   └── 推送说明.md               ← 同步状态快照
 ├── 01-竞品研究\                  ← 24 个竞品的分析与源码
 │   ├── 01-市场测算.md / 02-深度学习-12个L5.md / 04-首轮竞品全景.md
@@ -429,7 +430,7 @@ python disk-cleanup/scripts/usn.py since --drive C: --json
 
 ### 7.2 为什么不能直接 `git push`
 
-⚠️ **本地与远端的历史不是同一条链。** 本地是 80 个真实提交，远端是历次快照合成的提交；两者**树**逐字节一致，但**提交拓扑**不同。`git push` 在这个仓库结构上不可用，只能做快进提交。
+⚠️ **本地与远端的历史不是同一条链。** 本地是一串真实提交，远端是历次快照合成的提交；两者**树**逐字节一致，但**提交拓扑**不同。`git push` 在这个仓库结构上不可用，只能做快进提交。
 
 ### 7.3 推送流程
 
@@ -448,16 +449,18 @@ python push_via_api.py --message-file msg.txt
 - 每个上传的 blob 都回读校验 sha；
 - **workflow 文件走 Contents API**（见坑 4），其余走 tree/commit/ref；
 - 远端有、本地无的文件以 `sha: null` 删除；
-- 推完做**全量树比对**，打印 `verified: remote tree matches HEAD (62 files, byte-identical)`。
+- 推完做**全量树比对**，打印 `verified: remote tree matches HEAD (63 files, byte-identical)`。
 
 ### 7.4 同步后必须重建离线产物
 
 ⚠️ **产物按提交数命名，重建后必须同步改文件名和状态文档里的数字。**
 
+⚠️ **注意 `git -C` 的路径陷阱**：`git -C disk-cleanup-src bundle create clean-skill.bundle` 会把 bundle 建在**仓库目录里**，不是当前目录。随后 `git add -A` 会把这个几百 KB 的二进制扫进历史。本仓库已加 `.gitignore` 规则 `*.bundle` / `*.patch` 兜底——**重建产物时务必用绝对路径**。
+
 ```powershell
 cd Z:\磁盘清理-skill\00-交付物
 git -C disk-cleanup-src bundle create clean-skill.bundle --all
-git -C disk-cleanup-src format-patch --binary f7422a6..HEAD --stdout > "0003-0080-provable-executor.patch"
+git -C disk-cleanup-src format-patch --binary f7422a6..HEAD --stdout > "0003-NNNN-provable-executor.patch"
 ```
 
 然后更新 `推送说明.md` 的：同步状态段、本地 HEAD 与提交数、产物表、核对命令、历史表。

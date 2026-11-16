@@ -10,6 +10,10 @@ audit-*.jsonl
 .disk-cleanup/
 *.dcscan
 
+# 离线打包产物：含完整历史，体积大且只应留在交付目录
+*.bundle
+*.patch
+
 # 常见本地报告与实验恢复日志（可能含个人路径）
 baseline*.json
 current*.json
