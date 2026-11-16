@@ -83,6 +83,19 @@ class ResolveTests(unittest.TestCase):
     def test_root_is_empty(self):
         self.assertEqual(usn.resolve(5, self.entries), '')
 
+    def test_a_modern_root_number_still_resolves(self):
+        # Hosted runners show the root at 0x5000000000005, not the classic
+        # small number, so the root must be recognised by its self-parent,
+        # never by a hardcoded reference.
+        modern = {
+            0x5000000000005: (0x5000000000005, ''),
+            562949953421348: (0x5000000000005, 'inetpub'),
+            281474976710694: (562949953421348, 'DeviceHealthAttestation'),
+        }
+        self.assertEqual(usn.resolve(281474976710694, modern),
+                         'inetpub\\DeviceHealthAttestation')
+        self.assertEqual(usn.resolve(0x5000000000005, modern), '')
+
     def test_missing_parent_returns_none_instead_of_guessing(self):
         self.entries[103] = (777, 'orphan.bin')
         self.assertIsNone(usn.resolve(103, self.entries))
@@ -188,7 +201,10 @@ class LiveTests(unittest.TestCase):
         with usn.Volume('C:') as volume:
             entries = volume.enumerate()
         self.assertGreater(len(entries), 0)
-        self.assertIn(usn.ROOT_FRN, entries)
+        roots = [frn for frn, (parent, _name) in entries.items() if parent == frn]
+        self.assertEqual(len(roots), 1,
+                         'expected exactly one self-parented volume root, got %d' % len(roots))
+        self.assertEqual(usn.resolve(roots[0], entries), '')
 
     def test_a_tight_budget_is_refused_not_truncated(self):
         with usn.Volume('C:') as volume:
