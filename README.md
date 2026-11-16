@@ -94,7 +94,7 @@ Copy-Item -LiteralPath '.\disk-cleanup' -Destination $skillTarget -Recurse
 ```
 
 ```text
-使用 $disk-cleanup 分析 D:\Projects 的开发缓存，目标释放 10 GB。
+使用 $disk-cleanup 分析 D:\Projects 的开发缓存，目标是移出 10 GB。
 ```
 
 授权只对当前任务及明确范围有效。系统提权仍通过正常机制；不会绕过 UAC 或宿主权限。永久删除、关闭应用、重启等必须在授权中有明确选择。用户只要求分析时保持只读。
@@ -155,6 +155,62 @@ python disk-cleanup/scripts/compare_scans.py reports/baseline.json reports/curre
 - 报告包含路径和文件名，分享前请检查隐私。不要将真实扫描报告提交到仓库；`reports/` 已加入忽略项。
 - Windows 为主要支持平台；其他系统的目录扫描可用于开发测试，不能据此声称清理流程完整兼容。
 
+## 按容量目标起草计划
+
+先扫描，再把容量目标变成一份计划草稿：
+
+```powershell
+# 1. 扫描并保存报告
+python disk-cleanup/scripts/scan.py 'D:\Projects' --format json --output 'reports/scan.json'
+
+# 2. 起草计划：目标是移出 20 GiB，Git 仓库要单独审计才放行
+python disk-cleanup/scripts/plan_by_goal.py --scan 'reports/scan.json' --target 20GiB --git-audit --out 'reports/plan.json'
+
+# 3. 用注册表给已验证的缓存保留正确的风险标签
+python disk-cleanup/scripts/targets.py list --stat
+
+# 4. 交给 clean.py 预览（不带 --go 只预览）
+python disk-cleanup/scripts/clean.py --plan 'reports/plan.json'
+```
+
+**目标是移动量，不是释放量。** 所有动作只进回收站，清空前不释放空间；报告把"要求移出""预计移出""已释放"三个数分开，其中"已释放"恒为 0。想真正释放空间必须清空回收站，那是独立授权的动作，本技能不做。
+
+凑不够时脚本**照写计划并报出缺口**，例如"目标 20 GiB / 候选仅 12 GiB / 缺口 8 GiB"。它不会扩大扫描范围、降低风险标签或提高 `--max-targets` 来凑数；那些都得由你来定。
+
+三样东西无论多大都不能入选，并在报告里写明原因：门禁会拒绝的路径、扫描根本身、Git 工作树（除非 `--git-audit` 判定为 `SAFE_TO_CONSIDER`）。挑选器与执行器共用同一套门禁逻辑，所以草稿不会和自己的预览互相矛盾。
+
+```powershell
+python disk-cleanup/scripts/plan_by_goal.py --help
+```
+
+## NTFS 增量：只列变化，不重扫全盘
+
+需要管理员权限（要打开卷句柄）。没有提权时脚本退出 3 并说明原因，**不会**退回目录遍历冒充增量。
+
+```powershell
+# 存一个检查点（枚举全卷，不动你的文件）
+python disk-cleanup/scripts/usn.py baseline --drive C:
+
+# 之后只列出这段时间里变化的路径
+python disk-cleanup/scripts/usn.py since --drive C: --json
+```
+
+USN 记录只有文件名、父引用和原因，**没有大小**：变更条数不等于体积变化，字节数要对列出的路径单独 stat。同一个路径的多次事件会合并成一条，改名会配成一条并带 `renamed_from`。父目录不在索引里的条目进 `unresolved`（名字已知、绝对路径未知），此时 `complete` 为 false。
+
+日志被删除或重建、变更量大到可能回绕、索引超出内存预算时，它一律拒绝回答而不是猜，这时退回全量扫描。
+
+## 候选注册表
+
+"哪些东西可以清"是一份声明式清单，不是散落在文档里的散文：
+
+```powershell
+python disk-cleanup/scripts/targets.py list --stat
+```
+
+16 条，覆盖系统临时文件、崩溃转储、缩略图、浏览器缓存、npm/pip/nuget/vscode 缓存。`status=pending` 的条目（例如 Docker Desktop）尚未验证，**不作为候选**；`risk=never` 的条目（下载目录、回收站）永远不作为候选。
+
+被 `clean.py` 拒绝的路径照实报告并写明原因，不静默丢掉——`C:\Windows\Temp` 是真实存在的缓存，只是被门禁挡住，藏起来反而会教错。
+
 ## 验证
 
 ```powershell
@@ -183,7 +239,9 @@ $env:DISK_CLEANUP_E2E = '1'   # 需要它进 unittest 时
 python -m unittest disk-cleanup.tests.test_e2e -v
 ```
 
-它先跑 `recycle_selfcheck.py` 证明该卷能回收并还原，然后断言每个目标 `recycle.status=RECYCLED`、`proof.final_path` 落在 `$RECYCLE.BIN` 下、撤销后 `verified` 不为 false、恢复的字节与原文件一致。CI 里是独立作业（`.github/workflows/e2e.yml`），定时与手动触发，不阻塞普通 PR。
+它先跑 `recycle_selfcheck.py` 证明该卷能回收并还原，然后断言每个目标 `recycle.status=RECYCLED`、`proof.final_path` 落在 `$RECYCLE.BIN` 下、撤销后 `verified` 不为 false、恢复的字节与原文件一致。CI 里是独立作业（`.github/workflows/e2e.yml`），**每次 push 都跑**，失败即失败——托管 runner 已能跑通整条链路，所以这里红了就是真问题。
+
+> 写这个作业时踩到的坑：`run:` 里的**裸冒号**会让 GitHub 判定整个 workflow 文件无效，表现为静默不创建作业、显示名回落成文件路径。`--drive C:` 必须写成 `--drive "C:"`。
 
 `--allocation` 的 `allocated_bytes` 是**上层口径而不是承诺**：按 128 位 FileId 去重（硬链接只算一次），排除目录与文件系统元数据，并且是删除后可释放空间的**上限**；`reclaimable_bytes` 恒为 `unknown`，观察不完整时 `allocated_bytes` 为 `null`。本机实测（5 个路径含 1 个硬链接）：逻辑 8,388,608B，逐路径分配之和 8,388,608B，按 FileId 去重后 7,340,032B，报告值与去重值一致，硬链接那 1,048,576B 只计一次。
 
