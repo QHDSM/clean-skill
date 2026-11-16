@@ -181,11 +181,19 @@ class LiveTests(unittest.TestCase):
         self.assertGreater(data['journal_id'], 0)
         self.assertGreater(data['next_usn'], 0)
 
-    def test_a_small_enumeration_returns_entries(self):
+    def test_an_enumeration_returns_entries(self):
+        # Hosted runners hold several hundred thousand files on C:, so the
+        # budget here is the tool's own default; a machine that exceeds it
+        # should be refused by the budget, not by this test.
         with usn.Volume('C:') as volume:
-            entries = volume.enumerate(max_entries=50000)
+            entries = volume.enumerate()
         self.assertGreater(len(entries), 0)
         self.assertIn(usn.ROOT_FRN, entries)
+
+    def test_a_tight_budget_is_refused_not_truncated(self):
+        with usn.Volume('C:') as volume:
+            with self.assertRaises(usn.Truncated):
+                volume.enumerate(max_entries=1)
 
 
 if __name__ == '__main__':

@@ -1,10 +1,4 @@
 name: End-to-end recycle
-
-# Separate from test.yml on purpose: this job moves real files through the
-# Recycle Bin and restores them. A hosted runner that cannot recycle should not
-# turn every pull request red, so the job is scheduled and manual only.
-# continue-on-error is provisional until a hosted run has passed; remove it then.
-
 on:
   workflow_dispatch:
   schedule:
