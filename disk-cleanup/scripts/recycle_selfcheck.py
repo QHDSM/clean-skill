@@ -122,6 +122,15 @@ def run(drive=None, keep_evidence=False):
                metadata={key: parsed[key] for key in
                          ('version', 'size_bytes', 'deleted_unix', 'original_path')})
         if not matches:
+            # Spell both sides out. Two paths that look identical in a log can
+            # differ in a prefix, a short name or a trailing character, and the
+            # diff is the only thing that identifies which.
+            _stage(results, 'path_diff', False,
+                   'recorded={!r} expected={!r} canonical_recorded={!r} '
+                   'canonical_expected={!r}'.format(
+                       parsed['original_path'], str(probe),
+                       recycle_bin.canonical_path(parsed['original_path']),
+                       recycle_bin.canonical_path(str(probe))))
             return report
 
         restored = recycle_bin.restore(parsed)
