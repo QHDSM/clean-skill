@@ -47,6 +47,9 @@ import sys
 import time
 import uuid
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import recycle_bin  # canonical path comparison; it does not import this module
+
 SCHEMA = 'disk-cleanup-recycle-proof/v1'
 
 # FILEOP and IFileOperation flags. FOF_WANTNUKEWARNING is the one that asks the
@@ -679,7 +682,7 @@ def _classify(final, original):
         return 'RECYCLED', 'the object is inside the per-user Recycle Bin'
     if len(parts) >= 3 and parts[:2] == ['$extend', '$deleted']:
         return 'PERMANENTLY_DELETED', 'NTFS moved the object into $Extend\\$Deleted'
-    if os.path.normcase(final.replace('\\\\?\\', '')) == os.path.normcase(str(original)):
+    if recycle_bin.same_path(final, str(original)):
         return 'NOT_DELETED', 'the object still lives at its original path'
     return 'UNKNOWN', 'the object moved somewhere that is neither the bin nor $Deleted'
 
@@ -785,8 +788,7 @@ def _bin_entry(final, original):
             entry['metadata_error'] = str(exc)
     entry['original_path_matches'] = bool(
         entry.get('metadata') and
-        os.path.normcase(entry['metadata'].get('original_path', '')) ==
-        os.path.normcase(original))
+        recycle_bin.same_path(entry['metadata'].get('original_path', ''), original))
     return entry
 
 

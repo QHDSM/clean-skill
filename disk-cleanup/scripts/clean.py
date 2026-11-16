@@ -573,7 +573,7 @@ def _recover_attempted(record, done):
     import recycle_bin
 
     path = record.get('path')
-    if not path or os.path.normcase(path) in done:
+    if not path or recycle_bin.canonical_path(path) in done:
         return None
     item = {'path': path, 'action': 'restore', 'recovered': True}
     drive = os.path.splitdrive(os.path.abspath(path))[0].upper()
@@ -659,7 +659,9 @@ def undo_run(args):
         raise GateError(f'audit log not found: {path}')
     records, log_issues = _read_audit_log(path)
 
-    done = {os.path.normcase(record.get('path') or '')
+    # Canonical, not raw: the log holds the path the caller had, and the bin
+    # holds the path the Shell saw. The same object can appear under both.
+    done = {recycle_bin.canonical_path(record.get('path') or '')
             for record in records if record.get('result') == 'trashed'}
     results = []
     for record in records:
@@ -685,7 +687,10 @@ def undo_run(args):
             continue
         # The bin's own record of where the object came from must agree with the
         # log. A mismatch means one of the two was rewritten after the run.
-        if os.path.normcase(parsed['original_path']) != os.path.normcase(original):
+        # The two sides can spell the same path differently -- the log holds
+        # the short name the caller had, the bin holds the long name the Shell
+        # saw -- so compare canonically. A real disagreement still refuses.
+        if not recycle_bin.same_path(parsed['original_path'], original):
             item.update(result='refused',
                         detail='the bin metadata names a different original path: '
                                + parsed['original_path'])
