@@ -47,6 +47,7 @@
 
 | 脚本 | 能力 | 是否删除 |
 |---|---|---|
+| `scripts/doctor.py` | 一条命令体检这台机器：Python 与环境、回收后端可用性、每卷能力与回收站占用、USN 是否需提权、历史审计日志、git | 无（只读） |
 | `scripts/scan.py` | 只读扫描、分类、重复文件检测、`--allocation` 实测分配字节、`--streams` 枚举 NTFS 命名数据流、扫描期间目录变动检测 | **无任何删除能力** |
 | `scripts/targets.py` | 只读展开候选注册表：存在性、逻辑大小、门禁冲突、占用进程 | 无 |
 | `scripts/usn.py` | NTFS 变更日志：存检查点、列出增量变更（需管理员；只给路径与原因，不给大小） | 无 |
@@ -243,6 +244,8 @@ python -m unittest discover -s disk-cleanup/tests -v
 
 默认测试使用自建临时目录；覆盖扫描、报告比较、计划门禁、Git 审计、Windows 身份和目录链、隔离、回滚、撤销与崩溃恢复、日志中断检查。Windows 实际回收测试默认跳过，符号链接等平台能力不足时也会跳过；以当前运行输出为准。
 
+CI 除了跑这套测试，还统计五个承载安全契约的模块（`clean.py`、`recycle_backend.py`、`tree_evidence.py`、`scan.py`、`recycle_bin.py`）的 branch 覆盖率，低于 65% 直接失败。门槛写在仓库根的 [`.coveragerc`](.coveragerc) 里，本机可以复现：`python -m pip install coverage`，然后 `python -m coverage run -m unittest discover -s disk-cleanup/tests`，最后 `python -m coverage report`。门槛故意压低——本机实测线覆盖约 82%，branch 统计更低，它只用来看住『整块测试消失』，不对防御分支唠叨。
+
 可选实机测试需要 Windows，且只操作测试自行创建的文件及目录；成功后恢复、校验并清理测试对象，失败时会话保留测试对象供检查（不会放宽断言去掩盖失败）：
 
 ```powershell
@@ -283,12 +286,15 @@ python -m unittest disk-cleanup.tests.test_e2e -v
 - `disk-cleanup/references/`：按场景加载的 Windows、分类和开发工具指南，附官方资料。
 - `disk-cleanup/scripts/scan.py`：只读扫描，无删除能力。
 - `disk-cleanup/scripts/clean.py`：计划校验、dry-run、回收站执行与 `--undo`。
+- `disk-cleanup/scripts/doctor.py`：只读体检，一条命令给出 `READY` / `READY WITH WARNINGS` / `NOT READY`，退出码 0 / 1 / 2。
 - `disk-cleanup/scripts/recycle_backend.py`：可证明的回收后端，纯标准库。
 - `disk-cleanup/scripts/recycle_bin.py`：`$I`/`$R` 解析、按卷枚举与还原。
 - `disk-cleanup/scripts/locks.py`：占用探针与 Restart Manager 进程归因。
 - `disk-cleanup/scripts/recycle_selfcheck.py`：本机回收/还原能力的端到端自检，不碰用户路径。
 - `disk-cleanup/scripts/recycle_audit.py`：只读审计回收站与执行日志的交叉核对，不 prune、不还原。
 - `disk-cleanup/scripts/git_audit.py`：只读 Git 风险审计。
+- `disk-cleanup/scripts/version.py`：工具版本与 plan / goal / report / audit 四个 schema 常量。
+- [变更记录](CHANGELOG.md)：每个版本改了什么、对使用者意味着什么。
 - `disk-cleanup/tests/`：扫描与执行器测试、行为演练场景。
 
 工具版本和系统入口变化时，先检查本机帮助及官方资料，再更新对应参考。贡献修改时运行相关测试，并核实是否改变授权范围或数据保留规则。

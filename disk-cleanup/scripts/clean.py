@@ -57,8 +57,9 @@ import tree_evidence
 import windows_identity
 import windows_parents
 import windows_paths
+import version
 
-SCHEMA = 'disk-cleanup-plan/v1'
+SCHEMA = version.PLAN_SCHEMA
 ACTIONS = {'trash', 'keep', 'report'}
 RISKS = {'safe', 'caution', 'never'}
 GIT_VERDICTS = {'SAFE_TO_CONSIDER', 'LOCAL_ONLY_DATA_PRESENT', 'LOCAL_MODIFICATIONS', 'UNVERIFIED'}
@@ -95,7 +96,7 @@ def die(code, message):
     return code
 
 
-GOAL_SCHEMA = 'disk-cleanup-goal/v1'
+GOAL_SCHEMA = version.GOAL_SCHEMA
 GOAL_KINDS = {'move_bytes'}
 
 
@@ -508,6 +509,7 @@ class AuditJournal:
         if self._handle is None:
             return False
         row = {'run_id': self.run_id, 'seq': self._seq, 'ts': int(time.time()),
+               'tool_version': version.TOOL_VERSION,
                'plan': self._plan, 'plan_digest': self._digest, **record}
         try:
             self._handle.write(json.dumps(row, ensure_ascii=False) + '\n')
@@ -708,6 +710,8 @@ def undo_run(args):
     restored = [r for r in results if r['result'] == 'restored']
     return {
         'mode': 'UNDO',
+        'schema': version.REPORT_SCHEMA,
+        'tool_version': version.TOOL_VERSION,
         'plan': None,
         'plan_digest': None,
         'audit_log': str(path),
@@ -1098,6 +1102,8 @@ def run(args):
         }
     return {
         'mode': 'EXECUTED' if args.go else 'DRY-RUN',
+        'schema': version.REPORT_SCHEMA,
+        'tool_version': version.TOOL_VERSION,
         'plan': args.plan,
         'plan_digest': digest,
         'goal': goal_report,
@@ -1237,6 +1243,8 @@ def main(argv=None):
     parser.add_argument('--undo-last', action='store_true',
                         help='restore the most recent run')
     parser.add_argument('--json', action='store_true', help='machine-readable output')
+    parser.add_argument('--version', action='version',
+                        version=f'disk-cleanup {version.TOOL_VERSION}')
     args = parser.parse_args(argv)
 
     needs_lock = bool(args.go or args.undo or args.undo_last)

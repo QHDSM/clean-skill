@@ -1,0 +1,25 @@
+# Coverage gate for the modules that carry the safety contract, not for the
+# whole tree. The CLI entry points are covered by recycle_selfcheck.py and the
+# end-to-end job, and the helpers are exercised through the gate modules, so
+# measuring everything here would mostly add noise.
+#
+# The floor is deliberately low. Locally measured line coverage of these five
+# files is about 82%; CI runs with branch=True, which reads a few points lower
+# again. 65 leaves room for that difference while still failing loudly if a
+# test module is dropped or a whole code path loses its tests.
+[run]
+branch = True
+source = disk-cleanup/scripts
+
+[report]
+include =
+    */clean.py
+    */recycle_backend.py
+    */tree_evidence.py
+    */scan.py
+    */recycle_bin.py
+fail_under = 65
+show_missing = True
+exclude_lines =
+    pragma: no cover
+    if __name__ == .__main__.:

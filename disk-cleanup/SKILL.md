@@ -100,14 +100,16 @@ Windows 下还可用 `python scripts/windows_identity.py '<路径>'` 采集句�
 
 计划交给 `clean.py` 预览，它读取计划，不重放扫描结果：
 
-```powershellpython scripts/recycle_selfcheck.py --drive C:    # 先自检：本机能否回收并还原（一次性探针）
+```powershell
+python scripts/doctor.py                          # 只读体检：这台机器能不能用（退出码 0/1/2，不删任何东西）
+python scripts/recycle_selfcheck.py --drive C:    # 先自检：本机能否回收并还原（一次性探针）
 python scripts/clean.py --plan plan.json          # dry-run，只打印
 python scripts/clean.py --plan plan.json --go     # 回收站执行，每项带证据
 python scripts/clean.py --undo ~/.disk-cleanup/runs/audit-<时间戳>.jsonl   # 撤销一次执行
 python scripts/clean.py --undo-last               # 撤销最近一次执行
 ```
 
-首次在某台机器上执行前先跑 `recycle_selfcheck.py`：它在临时目录里造一个探针文件，走完整的回收→读回证据→还原→比对字节流程，不碰任何用户路径。退出码 0 表示这台机器确实能回收并还原；非 0 时把它的 `stages` 原样报给用户，不要跳过自检直接执行。
+首次在某台机器上执行前先跑 `doctor.py` 看整体结论——它只读、不改任何东西，环境/回收后端/每卷能力/回收站占用/USN/历史日志/git 六段一次扫完，退出码 0 全过、1 有警告、2 有硬问题。然后跑 `recycle_selfcheck.py`：它在临时目录里造一个探针文件，走完整的回收→读回证据→还原→比对字节流程，不碰任何用户路径。退出码 0 表示这台机器确实能回收并还原；非 0 时把它的 `stages` 原样报给用户，不要跳过自检直接执行。
 
 回收站现状可以用只读审计查看，不执行任何清理：
 

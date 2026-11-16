@@ -1,7 +1,7 @@
 # 交接文档：disk-cleanup skill（2026-11-16）
 
 > 接手者请先完整读一遍本文档，再动手。文档里带 ⚠️ 的段落是**踩过坑之后写下的纪律**，不是建议。
-> 文档中所有事实都经过实测核对，数字以本文档记录的时刻为准（`2026-11-16 19:05`）。
+> 文档中所有事实都经过实测核对，数字以本文档记录的时刻为准（`2026-11-16 19:45`）。
 
 ---
 
@@ -13,11 +13,12 @@
 | 交付仓库 | `QHDSM/clean-skill`（公开，MIT） |
 | 远端 HEAD | 见 `https://api.github.com/repos/QHDSM/clean-skill/commits/main`（或 `git ls-remote`）。**别拿它和本地 HEAD 比 SHA**：两边历史不是同一条链，要逐 blob 比 tree（§7.2） |
 | 本地 HEAD | **提交数与文件数以 `git rev-list --count HEAD` / `git ls-files | wc -l` 为准**——本文档自身会改变这两个数字，所以不写死 |
-| 跟踪文件 | 63（本文档写作时） |
-| 测试 | `Ran 424, OK (skipped=18)` |
-| CI | `Validate scanner` ✅ / `End-to-end recycle` ✅（均为绿） |
+| 跟踪文件 | 以 `git ls-files | wc -l` 为准（写作时 69） |
+| 测试 | `Ran 442, OK (skipped=18)` |
+| CI | `Validate scanner` ✅（含 65% 覆盖率门槛）/ `End-to-end recycle` ✅（均为绿） |
 | 运行时 | Python 3.10+，**纯标准库**，无第三方依赖 |
 | 平台 | Windows（NTFS / ReFS）。其他平台仅供开发测试 |
+| 版本 | `v0.1.0`：`clean.py --version` 打印 `disk-cleanup 0.1.0`；报告与审计行带 `tool_version` |
 | 许可证 | MIT，Copyright (c) 2026 QHDSM |
 
 **它做什么**：扫描磁盘 → 产出候选清单 → 生成带证据的清理计划 → 预览 → 执行回收站移动 → 每项给出内核级证据 → 可撤销。
@@ -66,23 +67,25 @@ Z:\磁盘清理-skill\
 
 ```
 disk-cleanup-src\
-├── README.md                    ← 用户面向的完整说明（12,503 字符）
+├── README.md                    ← 用户面向的完整说明（14,010 字符）
 ├── LICENSE                      ← MIT
 ├── .gitattributes               ← `* text=auto eol=lf`
 ├── .gitignore                   ← 排除 plan*.json / audit-*.jsonl / reports/
+├── .coveragerc                  ← 覆盖率门槛（五个 gate 模块，branch，fail_under=65）
+├── CHANGELOG.md                 ← 每个版本改了什么、对使用者意味着什么
 ├── .github\workflows\
 │   ├── test.yml                 ← 单元测试，Python 3.10 + 3.12 矩阵
 │   └── e2e.yml                  ← 真实回收→撤销，每次 push 都跑
 └── disk-cleanup\                ← ★ skill 本体
-    ├── SKILL.md                 ← agent 行为契约（10,552 字符）
+    ├── SKILL.md                 ← agent 行为契约（10,879 字符）
     ├── references\
     │   ├── plan-schema.md       ← ★ 计划格式、门禁规则、退出码、路径保护
     │   ├── targets.json         ← ★ 声明式候选注册表（16 条）
     │   ├── recycle-research.md  ← 回收站实现研究与 freedesktop 规范对照
     │   ├── windows.md / cleanup-categories.md / development-tools.md
     │   └── scan-comparison.md
-    ├── scripts\  (24 个, 6,875 行)
-    └── tests\    (22 个, 5,060 行)
+    ├── scripts\  (26 个, 7,208 行)
+    └── tests\    (24 个, 5,338 行)
 ```
 
 ### 2.1 脚本职责与规模
@@ -101,7 +104,11 @@ disk-cleanup-src\
 | `e2e_check.py` | 220 | 全链路验收（临时目录内） | 仅自建文件 |
 | `recycle_selfcheck.py` | 189 | 证明本机能回收并还原 | 仅临时探针 |
 | `recycle_audit.py` | 180 | 只读审计回收站与日志交叉核对 | 无 |
+| `doctor.py` | 307 | 只读体检：环境 / 回收后端 / 每卷能力与回收站占用 / USN / 历史日志 / git → `READY`·`READY WITH WARNINGS`·`NOT READY` | 无 |
+| `version.py` | 18 | 版本与四个 schema 常量（无 CLI，被 clean.py 与 doctor.py 引用） | 无 |
 | 其余 12 个 | 33–149 | 证据采集、对比、5 个 `*_experimental.py` 研究原型 | 见 `recycle-research.md` |
+
+**版本与发布**：`scripts/version.py` 是版本的唯一来源——`TOOL_VERSION` 加四个 schema 常量（plan / goal / report / audit）。发版三步：改 `TOOL_VERSION` → 在 `CHANGELOG.md` 写一条『对使用者意味着什么』→ `git tag -a vX.Y.Z`。报告与审计行里的 `tool_version` 是给事后用的：手里一份证据，能直接对上写它的版本，不必猜。
 
 > `*_experimental.py` 是历史研究原型，**未接入执行器，不得用于用户文件**，但仍被 `test_recycle_live.py` 覆盖。保留是因为它们记录了技术探索过程。
 
@@ -353,6 +360,7 @@ AMD 驱动不停写 dump 日志，**每 304 字节产生一条 USN 记录**，�
 | 2 | 计划被门禁拒绝，**没有执行任何操作**；或参数错误 |
 | 3 | 计划通过但部分目标被拒绝或失败（看 `results[]`） |
 | 130 | 用户中断（`scan.py` 返回部分结果） |
+| 0/1/2 | `doctor.py` 专用：全过 / 仅警告 / 有硬问题。它不执行任何操作，这里的 2 只表示体检不合格 |
 
 ---
 
@@ -393,14 +401,19 @@ python disk-cleanup/scripts/clean.py --plan 'reports/plan.json' --go
 # 撤销
 python disk-cleanup/scripts/clean.py --undo-last
 
-# 自检（首次在某机器上执行前必跑）
+# 体检（首次在某机器上执行前先跑这个：只读，一页给结论，退出码 0/1/2）
+python disk-cleanup/scripts/doctor.py
+
+# 自检（证明本机确实能回收并还原）
 python disk-cleanup/scripts/recycle_selfcheck.py --drive C:
 
 # 全链路验收（只碰自建文件）
 python disk-cleanup/scripts/e2e_check.py --drive C:
 
 # 测试
-python -m unittest discover -s disk-cleanup/tests          # 424 通过
+python -m unittest discover -s disk-cleanup/tests          # 442 通过
+python -m coverage run -m unittest discover -s disk-cleanup/tests   # 覆盖率门槛见 .coveragerc
+python -m coverage report
 DISK_CLEANUP_E2E=1 python -m unittest disk-cleanup.tests.test_e2e -v
 ```
 
@@ -483,7 +496,7 @@ git -C disk-cleanup-src format-patch --binary f7422a6..HEAD --stdout > "0003-NNN
 ```powershell
 cd Z:\磁盘清理-skill\00-交付物\disk-cleanup-src
 python -m unittest discover -s disk-cleanup/tests
-# Ran 424 tests, OK (skipped=18)
+# Ran 442 tests, OK (skipped=18)
 ```
 
 18 个跳过项分类：
@@ -497,11 +510,13 @@ python -m unittest discover -s disk-cleanup/tests
 
 ⚠️ **跳过项不等于通过。** 这 18 项在托管 runner 上是**真跑**的（runner 默认管理员），`End-to-end recycle` 作业正是为此存在。
 
+覆盖率门槛：`.coveragerc` 只统计五个承载安全契约的模块（`clean.py`、`recycle_backend.py`、`tree_evidence.py`、`scan.py`、`recycle_bin.py`），`branch = True`，`fail_under = 65`。本机实测线覆盖约 82%（clean 87.9% / recycle_bin 90.8% / scan 86.3% / tree_evidence 78.6% / recycle_backend 64.5%），branch 统计会再低几点，所以门槛压到 65：它只为抓住『整块测试消失』，不为每个防御分支报警。本机装不上 coverage.py（PyPI 不可达），这个门槛只在 CI 上真正执行；本地想复现先 `python -m pip install coverage`。
+
 ### 8.2 CI
 
 | Workflow | 触发 | 内容 |
 |---|---|---|
-| `Validate scanner` | push + PR | `unittest discover`，Python 3.10 + 3.12 矩阵 |
+| `Validate scanner` | push + PR | `unittest discover`，Python 3.10 + 3.12 矩阵；随后再跑一遍 coverage，低于 65% 即失败 |
 | `End-to-end recycle` | push | 真实回收→撤销→字节比对，**失败即失败** |
 
 ⚠️ `e2e.yml` 的 `run:` 里 `--drive "C:"` **必须带引号**（坑 2）。文件里有注释说明，别"清理"掉。
@@ -519,8 +534,8 @@ python -m unittest discover -s disk-cleanup/tests
 | # | 事项 | 状态 | 谁来做 |
 |---|---|---|---|
 | 1 | **USN 聚合逻辑真机复验** | 根判据与路径拼接已被用户的实机运行验证（跑出绝对路径）；**聚合**（合并同路径、改名配对）只过了单测 | 需一次提权 `since` |
-| 2 | **发布卫生** | **0 个 tag、无 CHANGELOG、README 未声明支持的 Windows 版本**。仓库是公开的，每个访客看到的都是无版本的一坨 | 接手者，约半小时 |
-| 3 | **`SKILL.md` 瘦身** | 10,552 字符。竞品研究把"提示预算 5.4KB 全场最低"列为差异化优势，现在翻了一倍。提示预算按会话次数相乘——**这是全项目唯一"越写越亏"的文件** | 接手者 |
+| 2 | **发布卫生** | **已关闭一半**：`v0.1.0` tag、`CHANGELOG.md`、`--version` 都已就位（2026-11-16）；仍缺 README 对支持的 Windows 版本的明确声明 | 接手者，十分钟 |
+| 3 | **`SKILL.md` 瘦身** | 10,879 字符。竞品研究把"提示预算 5.4KB 全场最低"列为差异化优势，现在翻了一倍。提示预算按会话次数相乘——**这是全项目唯一"越写越亏"的文件** | 接手者 |
 | 4 | **Docker 注册表条目定论** | 唯一的 `pending`。需一台装有 Docker Desktop 的机器做只读测量 | 需用户资源 |
 | 5 | **回收站目录写权限被改** | 明确**不覆盖**（见下） | 保持开放 |
 | 6 | **"真正释放"（清空回收站）** | 明确**不做**（见下） | 保持开放 |
