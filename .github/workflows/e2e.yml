@@ -2,8 +2,8 @@ name: End-to-end recycle
 
 # This job moves real files through the Recycle Bin and restores them, so it
 # runs on every push: a change that breaks the recycle path should show up in
-# CI rather than on a user's machine. continue-on-error keeps a hosted runner
-# that cannot recycle from turning unrelated pushes red.
+# CI rather than on a user's machine. The hosted runner now passes the whole
+# round trip, so a failure here is a real failure and is not swallowed.
 
 on: [push]
 permissions:
@@ -12,7 +12,6 @@ permissions:
 jobs:
   round-trip:
     runs-on: windows-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
