@@ -1,5 +1,10 @@
 name: End-to-end recycle
 on:
+  # push is deliberate: workflows that arrive with only schedule/dispatch
+  # sometimes never register with the trigger system (dispatch answers 422 and
+  # the workflow shows its path as its name) until they have actually run once.
+  # continue-on-error below keeps this from blocking anyone.
+  push:
   workflow_dispatch:
   schedule:
     - cron: '0 18 * * *'
