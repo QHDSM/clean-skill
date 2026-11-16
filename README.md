@@ -295,7 +295,8 @@ python -m unittest disk-cleanup.tests.test_e2e -v
 
 ## 制作人
 
-由 [QHDSM](https://github.com/QHDSM) 发起与维护，OpenAI Codex 参与开发与文档创作。
+项目发起与维护：[QHDSM](https://github.com/QHDSM)  
+撰稿人：OpenAI Codex
 
 ## 许可证
 
