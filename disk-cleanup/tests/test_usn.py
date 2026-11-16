@@ -83,18 +83,23 @@ class ResolveTests(unittest.TestCase):
     def test_root_is_empty(self):
         self.assertEqual(usn.resolve(5, self.entries), '')
 
-    def test_a_modern_root_number_still_resolves(self):
-        # Hosted runners show the root at 0x5000000000005, not the classic
-        # small number, so the root must be recognised by its self-parent,
-        # never by a hardcoded reference.
-        modern = {
-            0x5000000000005: (0x5000000000005, ''),
-            562949953421348: (0x5000000000005, 'inetpub'),
-            281474976710694: (562949953421348, 'DeviceHealthAttestation'),
-        }
-        self.assertEqual(usn.resolve(281474976710694, modern),
-                         'inetpub\\DeviceHealthAttestation')
-        self.assertEqual(usn.resolve(0x5000000000005, modern), '')
+    def test_root_with_a_sequence_number_resolves(self):
+        modern_root = 0x0005000000000005
+        entries = {modern_root: (0, ''), 100: (modern_root, 'Windows'),
+                   101: (100, 'Temp')}
+        self.assertTrue(usn.is_volume_root(modern_root))
+        self.assertEqual(usn.resolve(modern_root, entries), '')
+        self.assertEqual(usn.resolve(101, entries), 'Windows\\Temp')
+
+    def test_children_resolve_even_when_the_root_record_is_absent(self):
+        modern_root = 0x0005000000000005
+        entries = {100: (modern_root, 'Windows'), 101: (100, 'Temp')}
+        self.assertNotIn(modern_root, entries)
+        self.assertEqual(usn.resolve(101, entries), 'Windows\\Temp')
+
+    def test_another_mft_index_is_not_the_root(self):
+        self.assertFalse(usn.is_volume_root(6))
+        self.assertFalse(usn.is_volume_root(0))
 
     def test_missing_parent_returns_none_instead_of_guessing(self):
         self.entries[103] = (777, 'orphan.bin')
@@ -194,17 +199,16 @@ class LiveTests(unittest.TestCase):
         self.assertGreater(data['journal_id'], 0)
         self.assertGreater(data['next_usn'], 0)
 
-    def test_an_enumeration_returns_entries(self):
-        # Hosted runners hold several hundred thousand files on C:, so the
-        # budget here is the tool's own default; a machine that exceeds it
-        # should be refused by the budget, not by this test.
+    def test_an_enumeration_returns_resolvable_paths(self):
         with usn.Volume('C:') as volume:
             entries = volume.enumerate()
         self.assertGreater(len(entries), 0)
-        roots = [frn for frn, (parent, _name) in entries.items() if parent == frn]
-        self.assertEqual(len(roots), 1,
-                         'expected exactly one self-parented volume root, got %d' % len(roots))
-        self.assertEqual(usn.resolve(roots[0], entries), '')
+        # Do not require a root record: FSCTL_ENUM_USN_DATA does not promise one.
+        # What must exist is at least one child whose parent is the volume root.
+        children = [frn for frn, (parent, _name) in entries.items()
+                    if usn.is_volume_root(parent)]
+        self.assertTrue(children, 'no entry points at the volume root')
+        self.assertTrue(any(usn.resolve(frn, entries) for frn in children[:100]))
 
     def test_a_tight_budget_is_refused_not_truncated(self):
         with usn.Volume('C:') as volume:

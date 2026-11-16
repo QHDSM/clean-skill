@@ -40,6 +40,18 @@ INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 ERROR_HANDLE_EOF = 38
 ERROR_MORE_DATA = 234
 ERROR_ACCESS_DENIED = 5
+# NTFS file reference numbers pack a 48-bit MFT index and a 16-bit sequence.
+# The volume root is MFT index 5, but its sequence is not fixed: hosted runners
+# report 0x0005000000000005. The root record may also be absent from the
+# enumeration, or have a parent other than itself, so neither "record 5" nor
+# "self-parented record" is a usable test.
+ROOT_INDEX = 5
+FRN_INDEX_MASK = 0x0000FFFFFFFFFFFF
+
+
+def is_volume_root(frn):
+    return (frn & FRN_INDEX_MASK) == ROOT_INDEX
+
 USN_REASON = {
     0x00000001: 'data_overwrite', 0x00000002: 'data_extend',
     0x00000004: 'data_truncation', 0x00000010: 'named_data_overwrite',
@@ -162,15 +174,11 @@ def load_state(path):
 
 
 def resolve(frn, entries, cache=None, depth=0):
-    """Turn a file reference number into a full path, or None when the chain breaks.
-
-    A record whose parent is itself is the volume root. It used to be hardcoded
-    as MFT record 5, but the file reference number is (segment << 16) plus a
-    sequence, and hosted runners show the root at 0x5000000000005 -- so the
-    root is recognised structurally, and any self-parented record is treated
-    as the root regardless of its number.
-    """
-    if frn in (cache or {}):
+    """Turn a file reference number into a full path, or None when the chain breaks."""
+    if is_volume_root(frn):
+        return ''
+    cache = {} if cache is None else cache
+    if frn in cache:
         return cache[frn]
     if depth > 512:
         return None
@@ -178,9 +186,6 @@ def resolve(frn, entries, cache=None, depth=0):
     if node is None:
         return None
     parent, name = node
-    if parent == frn:
-        return ''
-    cache = {} if cache is None else cache
     base = resolve(parent, entries, cache, depth + 1)
     if base is None:
         return None
