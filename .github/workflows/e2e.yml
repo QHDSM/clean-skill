@@ -1,7 +1,14 @@
 name: End-to-end recycle
+
+# This job moves real files through the Recycle Bin and restores them, so it
+# runs on every push: a change that breaks the recycle path should show up in
+# CI rather than on a user's machine. continue-on-error keeps a hosted runner
+# that cannot recycle from turning unrelated pushes red.
+
 on: [push]
 permissions:
   contents: read
+
 jobs:
   round-trip:
     runs-on: windows-latest
@@ -12,4 +19,8 @@ jobs:
         with:
           python-version: '3.12'
       - name: Recycle and restore a throwaway directory
+        # The drive argument must stay quoted. An unquoted "C:" makes GitHub
+        # treat the whole workflow file as invalid: the workflow keeps its path
+        # as its display name, no job is created, and every run fails with an
+        # empty job list. Quoting it registers the workflow normally.
         run: python disk-cleanup/scripts/e2e_check.py --drive "C:"
