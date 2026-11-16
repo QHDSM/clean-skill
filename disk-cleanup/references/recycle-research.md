@@ -74,3 +74,64 @@ Windows 实机测试已覆盖 COM 初始化、接口创建、设置标志、创�
 4. **`DeletionDate` 的等价物**：`$I` 记录删除时间，但精度与来源（本地时间 vs UTC）在不同 Windows 版本上不一致。`--undo` 的 ±5 秒窗口已考虑这一点，仍未做跨版本验证。
 
 第 1 条是唯一会改变执行路径的缺口，其余三条是报告措辞与覆盖面问题。
+
+---
+
+# 托管 runner 上的实机失败（2026-11-16）
+
+GitHub 的 `windows-latest` 托管机第一次真正跑了完整链路，暴露了两个只在本机永远看不到的缺陷。两者都不是"代码写错了"，而是**假设了 Windows 路径只有一种写法**。
+
+## 缺陷一：路径拼写不一致导致拒绝
+
+托管机的 TEMP 是短名 `C:/Users/RUNNER~1/...`，而 Shell 写进 `$I` 的是长名 `C:/Users/runneradmin/...`。**同一个目录，两种拼写。**
+
+原来的四处比对都是裸字符串相等，于是：
+
+| 位置 | 后果 |
+|---|---|
+| `recycle_selfcheck.py` 的 metadata 检查 | 自检失败，误报"无法回收" |
+| `clean.py` 撤销时"回收站记录与日志记录必须一致" | 撤销被拒，报告对象不可恢复——**而它就在回收站里** |
+| `clean.py` 撤销时的已恢复集合 | 同一对象在两种拼写下被当成两个 |
+| `recycle_backend.py` 的"对象仍在原路径"判定与元数据匹配 | 判定不可靠 |
+
+修法是 `recycle_bin.canonical_path()`：去掉 `\\?\` 长路径前缀、**逐段**展开 8.3 短名、归一分隔符与大小写。
+
+**逐段展开是必需的**：文件被移进回收站后原路径已不存在，整条路径的 `GetLongPathNameW` 会失败；只有父目录还能解析。托管机的诊断输出正是这条：
+
+```
+recorded='C:/Users/runneradmin/.../probe.txt'
+expected='C:/Users/RUNNER~1/.../probe.txt'
+```
+
+**教训**：Windows 上"同一个路径"至少有两种以上写法。凡是判断"这两串说的是同一个东西"的地方，都不能用字符串相等。
+
+## 缺陷二：workflow 文件里的裸冒号
+
+托管机上 e2e 从未创建过作业：workflow 的显示名一直是文件路径，每次 run 都是 failure 且作业列表为空，`workflow_dispatch` 回答 422。
+
+排查过程排除了触发器写法（块式/流式都试过）、`schedule`、`workflow_dispatch`、`continue-on-error`、BOM、CRLF、文件内容与字节——**全部无关**。
+
+二分定位到唯一变量：**`run:` 命令里的裸冒号**。
+
+```yaml
+run: python disk-cleanup/scripts/e2e_check.py --drive C:    # 无效：不注册
+run: python disk-cleanup/scripts/e2e_check.py --drive "C:"  # 有效：正常注册
+```
+
+**教训**：GitHub 会因为 `run:` 里的裸冒号判定整个 workflow 文件无效，而它的表现是**静默**的——不报错、不给作业、只把显示名回落成路径。排查这类"文件明明合法却不执行"的问题，**必须逐字符二分内容**，靠读文档或猜触发器写法都会绕远路。
+
+## 现在的状态
+
+托管 runner 上完整链路通过：
+
+```
+[ok ] every target reports RECYCLED -- RECYCLED, RECYCLED
+[ok ] every proof points into $RECYCLE.BIN -- \\?\C:/$Recycle.Bin/S-1-5-21-.../.../$RQH8FMB.bin
+[ok ] an audit log was written -- C:/Users/runneradmin/.disk-cleanup/runs/audit-...jsonl
+[ok ] both objects restored -- restored, restored
+[ok ] restored identity verified where recorded -- True, True
+[ok ] restored bytes match what was written
+result: OK
+```
+
+`continue-on-error: true` 已摘除：托管机能跑通整条链路，失败就是真失败。
