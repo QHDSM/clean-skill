@@ -1,0 +1,13 @@
+name: Probe block on with schedule
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 18 * * *'
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo hi
