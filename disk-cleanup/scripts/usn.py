@@ -359,6 +359,62 @@ def cmd_baseline(args):
     return 0
 
 
+def aggregate(events):
+    """Collapse raw USN records into one entry per path.
+
+    A file that is being written to produces a record every few hundred bytes,
+    so one path can account for hundreds of records in a single run. Reporting
+    each record separately makes the output unusable, and a rename arrives as
+    two records (old name, then new name) that belong together.
+
+    Each result carries the event count and the reasons that were seen, so a
+    path touched 300 times reads as one line with 300 events, not 300 lines.
+    """
+    by_path = {}
+    old_names = {}
+    completed = set()
+    for event in events:
+        path = event['path']
+        if event['action'] == 'renamed-away':
+            # A rename is two records for one object: the old name and the new
+            # one. They share a file reference number, which is what pairs them.
+            old_names[event['frn']] = path
+            continue
+        completed.add(event['frn'])
+        slot = by_path.get(path)
+        if slot is None:
+            slot = {'path': path, 'action': event['action'], 'events': 0,
+                    'reasons': set(), 'first_usn': event['usn'], 'last_usn': event['usn'],
+                    'frn': event['frn'], 'renamed_from': None}
+            by_path[path] = slot
+        slot['events'] += 1
+        slot['reasons'].update(event['reasons'])
+        slot['last_usn'] = event['usn']
+        if event['action'] in ('created', 'deleted'):
+            slot['action'] = event['action']
+        elif slot['action'] == 'created':
+            pass  # a create followed by writes is still a create
+        else:
+            slot['action'] = event['action']
+    for slot in by_path.values():
+        old = old_names.get(slot['frn'])
+        if old:
+            slot['renamed_from'] = old
+            slot['action'] = 'renamed'
+    for frn, old in old_names.items():
+        # Only a rename whose new name never arrived is reported on its own.
+        if frn not in completed and old not in by_path:
+            by_path[old] = {'path': old, 'action': 'renamed-away', 'events': 1,
+                            'reasons': {'rename_old_name'}, 'first_usn': 0, 'last_usn': 0,
+                            'frn': frn, 'renamed_from': None}
+    out = []
+    for slot in by_path.values():
+        slot['reasons'] = sorted(slot['reasons'])
+        out.append(slot)
+    out.sort(key=lambda item: (-item['events'], item['path']))
+    return out
+
+
 def cmd_since(args):
     path = args.state or default_state(args.drive)
     if not os.path.exists(path):
@@ -375,8 +431,7 @@ def cmd_since(args):
     finally:
         volume.close()
 
-    cache, changes = {}, []
-    unresolved = []
+    cache, events, unresolved = {}, [], []
     for record in records:
         if record['reason'] & 0x80000000 and record['reason'] & 0x00000200 == 0:
             continue  # pure close events say nothing about content
@@ -390,13 +445,15 @@ def cmd_since(args):
                                'reasons': _decode_reasons(record['reason'])})
             continue
         full = join_path(volume.drive, parent, record['name'])
-        changes.append({'action': classify(record), 'path': full,
-                        'reasons': _decode_reasons(record['reason']),
-                        'usn': record['usn']})
+        events.append({'action': classify(record), 'path': full, 'frn': record['frn'],
+                       'reasons': _decode_reasons(record['reason']),
+                       'usn': record['usn']})
         if 'file_delete' in _decode_reasons(record['reason']):
             entries.pop(record['frn'], None)
         elif record['name']:
             entries[record['frn']] = (record['parent'], record['name'])
+
+    changes = aggregate(events)
 
     if not args.dry_run:
         save_state(path, {'volume': volume.drive, 'journal_id': journal['journal_id'],
@@ -410,11 +467,13 @@ def cmd_since(args):
     result = {'schema': SCHEMA_CHANGES, 'ok': True, 'drive': volume.drive,
               'from_usn': header['next_usn'], 'to_usn': cursor,
               'counts': counts, 'changes': changes,
+              'records': len(events),
               'unresolved': unresolved,
               'complete': not unresolved,
               'caveats': [
                   'USN records give names, parents and reasons, not sizes; stat the listed paths for bytes.',
-                  'A rename appears as two records (old name, then new name).',
+                  'One path can carry many records; "events" counts them and the reasons are merged.',
+                  'A rename appears as one entry with renamed_from set to the old path.',
                   'Close-only events are dropped; they do not indicate new content.',
                   'The map is a point-in-time index: if the journal wrapped, this refuses instead of guessing.',
                   'Entries whose parent is missing from the index are listed under "unresolved"; '
@@ -424,10 +483,12 @@ def cmd_since(args):
         print(json.dumps(result, ensure_ascii=False, indent=2))
     else:
         for change in changes:
-            print(f"{change['action']:<14} {change['path']}")
+            extra = f"  x{change['events']}" if change['events'] > 1 else ''
+            renamed = ('  <- ' + change['renamed_from']) if change['renamed_from'] else ''
+            print(f"{change['action']:<14} {change['path']}{extra}{renamed}")
         for change in unresolved:
             print(f"{change['action']:<14} (unresolved) {change['name']}")
-        print(f"\n{len(changes)} change(s): " +
+        print(f"\n{len(changes)} path(s) from {len(events)} record(s): " +
               ', '.join(f'{k}={v}' for k, v in sorted(counts.items())))
         if unresolved:
             print(f'{len(unresolved)} unresolved: the parent directory is not in the index')

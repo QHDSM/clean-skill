@@ -118,6 +118,59 @@ class ResolveTests(unittest.TestCase):
         self.assertIn(101, cache)
 
 
+class AggregateTests(unittest.TestCase):
+    def event(self, path, action='modified', frn=1, usn=1, reasons=('data_extend',)):
+        return {'action': action, 'path': path, 'frn': frn, 'usn': usn,
+                'reasons': list(reasons)}
+
+    def test_many_records_on_one_path_collapse(self):
+        events = [self.event('C:\\a.log', usn=index) for index in range(300)]
+        out = usn.aggregate(events)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]['events'], 300)
+        self.assertEqual(out[0]['path'], 'C:\\a.log')
+
+    def test_distinct_paths_stay_distinct(self):
+        events = [self.event('C:\\a.log'), self.event('C:\\b.log', frn=2)]
+        out = usn.aggregate(events)
+        self.assertEqual(len(out), 2)
+
+    def test_a_rename_is_one_entry_with_the_old_path(self):
+        events = [self.event('C:\\old.log', action='renamed-away', frn=7),
+                  self.event('C:\\new.log', action='renamed', frn=7)]
+        out = usn.aggregate(events)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]['action'], 'renamed')
+        self.assertEqual(out[0]['renamed_from'], 'C:\\old.log')
+        self.assertEqual(out[0]['path'], 'C:\\new.log')
+
+    def test_a_rename_without_a_new_name_is_reported_as_gone(self):
+        events = [self.event('C:\\old.log', action='renamed-away', frn=7)]
+        out = usn.aggregate(events)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]['action'], 'renamed-away')
+
+    def test_reasons_are_merged(self):
+        events = [self.event('C:\\a.log', reasons=('data_extend',)),
+                  self.event('C:\\a.log', reasons=('data_overwrite',), usn=2)]
+        out = usn.aggregate(events)
+        self.assertEqual(out[0]['reasons'], ['data_extend', 'data_overwrite'])
+
+    def test_a_delete_wins_over_earlier_writes_on_the_same_path(self):
+        events = [self.event('C:\\a.log'),
+                  self.event('C:\\a.log', action='deleted', usn=2,
+                             reasons=('file_delete',))]
+        out = usn.aggregate(events)
+        self.assertEqual(out[0]['action'], 'deleted')
+
+    def test_a_create_is_not_downgraded_by_later_writes(self):
+        events = [self.event('C:\\a.log', action='created', reasons=('file_create',)),
+                  self.event('C:\\a.log', usn=2)]
+        out = usn.aggregate(events)
+        self.assertEqual(out[0]['action'], 'created')
+        self.assertEqual(out[0]['events'], 2)
+
+
 class JoinPathTests(unittest.TestCase):
     def test_a_direct_child_of_the_root_keeps_the_drive_letter(self):
         # resolve() is relative to the volume root; dropping the drive here

@@ -76,7 +76,7 @@ python scripts/git_audit.py '<仓库路径>' --format json
 
 用户询问“相比上次哪里变大”时，先用 `python scripts/compare_scans.py '<旧扫描.json>' '<新扫描.json>'` 比较已有报告，详见 [扫描对比规则](references/scan-comparison.md)。只有 `comparable: true` 时使用差值；Top 列表缺席不是新增、删除或零大小的证明。基线报告含个人路径，保留本地，不上传或提交。
 
-需要“自上次以来变了什么”而不想重扫全盘时，可用 NTFS 变更日志：先 `python scripts/usn.py baseline --drive C:` 存检查点，之后 `python scripts/usn.py since --drive C: --json` 只列变更路径。它**需要管理员**——打不开卷就退出 3 并说明原因，不要改用目录遍历冒充增量。USN 记录只有文件名、父引用和原因，**没有大小**：变更条数不等于体积变化，字节数要对列出的路径单独 stat。日志被删除或重建、变更量大到可能回绕、索引超出内存预算时，它一律拒绝回答而不是猜；这时退回全量扫描。父目录不在索引里时，该条进 `unresolved`（名字已知、绝对路径未知），不与已解析条目混在一起；此时 `complete` 为 false，如实转达，不要把未解析条目当成"路径不存在"。
+需要“自上次以来变了什么”而不想重扫全盘时，可用 NTFS 变更日志：先 `python scripts/usn.py baseline --drive C:` 存检查点，之后 `python scripts/usn.py since --drive C: --json` 只列变更路径。它**需要管理员**——打不开卷就退出 3 并说明原因，不要改用目录遍历冒充增量。USN 记录只有文件名、父引用和原因，**没有大小**：变更条数不等于体积变化，字节数要对列出的路径单独 stat。同一个文件被反复写入会产生成百上千条记录，输出按路径聚合，每条给出 `events` 次数与合并后的原因；改名是一条记录，`renamed_from` 指向旧路径。日志被删除或重建、变更量大到可能回绕、索引超出内存预算时，它一律拒绝回答而不是猜；这时退回全量扫描。父目录不在索引里时，该条进 `unresolved`（名字已知、绝对路径未知），不与已解析条目混在一起；此时 `complete` 为 false，如实转达，不要把未解析条目当成"路径不存在"。
 
 ## 4. 把执行意图写成计划
 
